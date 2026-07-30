@@ -55,7 +55,7 @@
           <div class="offline" id="offline"><div><b id="offlineTitle">Worker Curtis is not streaming at this time</b><span>Live video appears here when their Sam Cam is connected and recording.</span></div></div>
           <div id="liveLabel" class="live-label hidden">● LIVE</div>
         </div>
-        <div class="bar"><strong id="status">Checking Curtis…</strong><button id="audioToggle" type="button" disabled>Enable sound</button><span id="audioStatus" class="hint">Sound is off</span><span class="hint">Public demo feed</span></div>
+        <div class="bar"><strong id="status">Checking Curtis…</strong><button id="audioToggle" type="button" disabled>Enable sound</button><span class="hint">Public demo feed</span></div>
       </section>
       <section class="transcript">
         <div class="panel-head"><strong>Live transcript</strong><span id="transcriptStatus" class="hint">Waiting for stream</span></div>
@@ -119,7 +119,7 @@ const formatTime = seconds => { seconds=Math.max(0,Math.floor(Number(seconds)||0
 const formatDate = epoch => epoch ? new Date(Number(epoch)*1000).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : 'Recording';
 
 function audioSocketUrl() { return `${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/live-audio/${encodeURIComponent(worker)}`; }
-function updateAudioUi(message) { const button=$('audioToggle'); button.disabled=!liveState.streaming; button.textContent=audioEnabled?'Mute sound':'Enable sound'; $('audioStatus').textContent=message || (!liveState.streaming?'Sound is off':audioEnabled?'Feedback guard on':'Click Enable sound to hear the camera'); }
+function updateAudioUi() { const button=$('audioToggle'); button.disabled=!liveState.streaming; button.textContent=audioEnabled?'Mute sound':'Enable sound'; }
 function ensureFeedbackSafeAudioGraph() { if (!audioContext || audioLimiter) return; audioHighPass=audioContext.createBiquadFilter(); audioHighPass.type='highpass'; audioHighPass.frequency.value=120; audioHighPass.Q.value=.707; audioLowPass=audioContext.createBiquadFilter(); audioLowPass.type='lowpass'; audioLowPass.frequency.value=2800; audioLowPass.Q.value=.707; audioLimiter=audioContext.createDynamicsCompressor(); audioLimiter.threshold.value=-24; audioLimiter.knee.value=0; audioLimiter.ratio.value=20; audioLimiter.attack.value=.003; audioLimiter.release.value=.12; audioMasterGain=audioContext.createGain(); audioMasterGain.gain.value=LIVE_AUDIO_SPEAKER_GAIN; audioHighPass.connect(audioLowPass).connect(audioLimiter).connect(audioMasterGain).connect(audioContext.destination); }
 function clearScheduledAudio() { if (!audioContext) return; audioSources.forEach(source=>{ try { source.stop(); } catch {} }); audioSources.clear(); audioNextTime=audioContext.currentTime; }
 function disconnectLiveAudio() { if (audioReconnectTimer) { clearTimeout(audioReconnectTimer); audioReconnectTimer=0; } const socket=liveAudioSocket; liveAudioSocket=null; if (socket && socket.readyState<2) socket.close(); clearScheduledAudio(); }
