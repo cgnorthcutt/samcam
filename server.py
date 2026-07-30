@@ -31,6 +31,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from transcript_quality import (
+    duplicate_transcript_reason,
+    normalize_transcript_text,
+    transcript_rejection_reason,
+)
+
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 CACHE = HERE / ".cache"
@@ -1479,6 +1485,9 @@ class Transcriber:
         self.silence_events = 0
         self.last_rms_db: float | None = None
         self.lines: deque[dict] = deque(maxlen=200)
+        # A second gate lives in the parent process so a buggy/restarted MLX
+        # worker can never make invented text visible or archive it.
+        self.recent_transcript_texts: deque[str] = deque(maxlen=12)
         self.diagnostics: deque[str] = deque(maxlen=30)
 
     def start(self) -> dict:
@@ -1507,6 +1516,7 @@ class Transcriber:
             self.audio_dropped_bytes = 0
             self.silence_events = 0
             self.last_rms_db = None
+            self.recent_transcript_texts.clear()
             while True:
                 try:
                     self.audio_queue.get_nowait()
@@ -1626,10 +1636,29 @@ class Transcriber:
                             event.get("chunk_seconds", self.chunk_seconds)
                         )
                     elif kind == "transcript":
+                        text = event.get("text", "")
+                        duration = max(
+                            0.0,
+                            float(event.get("ended", 0.0)) - float(event.get("started", 0.0)),
+                        )
+                        rejection = transcript_rejection_reason(text, duration)
+                        if rejection is None:
+                            rejection = duplicate_transcript_reason(
+                                text, self.recent_transcript_texts
+                            )
+                        if rejection is not None:
+                            self.silence_events += 1
+                            self.diagnostics.append(
+                                f"discarded transcript ({rejection}): {str(text)[:120]}"
+                            )
+                            continue
                         self.seq += 1
                         event["id"] = self.seq
                         event["received_at"] = self.last_event_at
                         self.lines.append(event)
+                        self.recent_transcript_texts.append(
+                            normalize_transcript_text(text)
+                        )
                         self.state = "running"
                         self.error = None
                         self.last_rms_db = event.get("rms_db")
