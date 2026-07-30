@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
 from restore_archive_audio import (
     REQUIRED_FILTERS,
+    audio_mastering_decision,
+    command_path,
+    encoded_audio_packet_hashes,
+    preservation_command,
+    probe_media,
     RestorationError,
     TARGET_AUDIO_BITRATE,
     TARGET_SAMPLE_RATE,
@@ -17,12 +24,25 @@ from restore_archive_audio import (
     plan_for,
     quiet_input_filter,
     render_command,
+    restore,
     restoration_filters,
+    validate_preserved_media,
     validate_restored_media,
 )
 
 
 ALL_FILTERS = set(REQUIRED_FILTERS) | {"adeclick", "adeclip", "afftdn"}
+RAW_VANGUARD_ORIGINALS = (
+    Path("/Users/cgn/Downloads/mcp_video-289_singular_display.mov"),
+    Path("/Users/cgn/Downloads/IMG_3095.MOV"),
+)
+
+
+def raw_media_integration_enabled() -> bool:
+    return (
+        os.environ.get("SAMCAM_RUN_MEDIA_INTEGRATION") == "1"
+        and all(path.is_file() for path in RAW_VANGUARD_ORIGINALS)
+    )
 
 
 class RestoreArchiveAudioTests(unittest.TestCase):
@@ -99,6 +119,42 @@ class RestoreArchiveAudioTests(unittest.TestCase):
         self.assertIn("0:v?", command)
         self.assertIn("0:a:0", command)
 
+    def test_healthy_stereo_source_uses_lossless_audio_passthrough(self) -> None:
+        source_probe = {
+            "format": {"duration": "73.3"},
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1",
+                "width": 1920, "height": 1080, "pix_fmt": "yuv420p",
+            }, {
+                "codec_type": "audio", "codec_name": "aac", "profile": "LC",
+                "sample_rate": "48000", "channels": 2, "channel_layout": "stereo",
+                "bit_rate": "96374",
+            }],
+        }
+        decision = audio_mastering_decision(source_probe)
+        self.assertEqual(decision.mode, "preserve")
+
+        command = preservation_command(
+            "/usr/local/bin/ffmpeg", Path("/tmp/input.mov"), Path("/tmp/output.mp4")
+        )
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-af", command)
+        self.assertNotIn("-ar", command)
+        self.assertNotIn("-ac", command)
+
+    def test_degraded_mono_bodycam_audio_still_uses_restoration(self) -> None:
+        bodycam_probe = {
+            "format": {"duration": "76.4"},
+            "streams": [{
+                "codec_type": "audio", "codec_name": "aac", "profile": "LC",
+                "sample_rate": "16000", "channels": 1, "channel_layout": "mono",
+                "bit_rate": "52940",
+            }],
+        }
+        decision = audio_mastering_decision(bodycam_probe)
+        self.assertEqual(decision.mode, "restore")
+        self.assertIn("sample rate", decision.reason)
+
     def test_default_destination_never_overwrites_source(self) -> None:
         source = Path("/archive/recording.mp4")
         self.assertEqual(default_destination(source), Path("/archive/recording.restored.mp4"))
@@ -136,6 +192,61 @@ class RestoreArchiveAudioTests(unittest.TestCase):
         restored["streams"][0]["codec_name"] = "hevc"
         with self.assertRaisesRegex(RestorationError, "video"):
             validate_restored_media(source, restored)
+
+    def test_preserved_media_rejects_any_audio_metadata_change(self) -> None:
+        source = {
+            "format": {"duration": "4.0"},
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1",
+                "width": 1920, "height": 1080, "pix_fmt": "yuv420p",
+            }, {
+                "codec_type": "audio", "codec_name": "aac", "profile": "LC",
+                "sample_rate": "48000", "channels": 2, "channel_layout": "stereo",
+            }],
+        }
+        preserved = {
+            "format": {"duration": "4.0"},
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1",
+                "width": 1920, "height": 1080, "pix_fmt": "yuv420p",
+            }, {
+                "codec_type": "audio", "codec_name": "aac", "profile": "LC",
+                "sample_rate": "48000", "channels": 1, "channel_layout": "mono",
+            }],
+        }
+        with self.assertRaisesRegex(RestorationError, "source audio metadata"):
+            validate_preserved_media(source, preserved)
+
+    @unittest.skipUnless(
+        raw_media_integration_enabled(),
+        "set SAMCAM_RUN_MEDIA_INTEGRATION=1 with the original Vanguard MOVs present",
+    )
+    def test_raw_vanguard_originals_are_stream_copied_packet_for_packet(self) -> None:
+        """Opt-in proof against the actual original, not a cached archive MP4."""
+        ffmpeg = command_path("ffmpeg")
+        ffprobe = command_path("ffprobe")
+        with tempfile.TemporaryDirectory(prefix="samcam-audio-preservation-") as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            for source in RAW_VANGUARD_ORIGINALS:
+                with self.subTest(source=source.name):
+                    source_probe = probe_media(ffprobe, source)
+                    self.assertEqual(audio_mastering_decision(source_probe).mode, "preserve")
+                    destination = temporary_root / f"{source.stem}.preserved.mp4"
+                    self.assertEqual(
+                        restore(
+                            source,
+                            destination,
+                            ffmpeg=ffmpeg,
+                            ffprobe=ffprobe,
+                            available_filters=(),
+                        ),
+                        "created",
+                    )
+                    validate_preserved_media(source_probe, probe_media(ffprobe, destination))
+                    self.assertEqual(
+                        encoded_audio_packet_hashes(ffprobe, source),
+                        encoded_audio_packet_hashes(ffprobe, destination),
+                    )
 
 
 if __name__ == "__main__":  # pragma: no cover

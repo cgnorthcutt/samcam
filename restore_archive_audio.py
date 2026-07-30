@@ -45,7 +45,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 
 TARGET_SAMPLE_RATE = 48_000
@@ -72,10 +72,34 @@ VIDEO_IDENTITY_FIELDS = (
     "height",
     "pix_fmt",
 )
+AUDIO_IDENTITY_FIELDS = (
+    "codec_name",
+    "profile",
+    "sample_rate",
+    "channels",
+    "channel_layout",
+)
+
+# Do not subject already healthy stereo source audio to speech repair.  This
+# intentionally recognizes high-quality capture conservatively: a stereo,
+# full-bandwidth signal with enough encoded bandwidth to preserve ambience and
+# spatial cues.  A 16 kHz mono body-camera microphone will not match this
+# profile and therefore still receives the restoration path below.
+PRESERVE_MIN_SAMPLE_RATE = 44_100
+PRESERVE_MIN_CHANNELS = 2
+PRESERVE_MIN_BITRATE = 80_000
 
 
 class RestorationError(RuntimeError):
     """The source was not modified and no validated output was produced."""
+
+
+@dataclass(frozen=True)
+class AudioMasteringDecision:
+    """Whether archive audio needs repair or can be preserved exactly."""
+
+    mode: Literal["preserve", "restore"]
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -317,6 +341,46 @@ def render_command(ffmpeg: str, source: Path, destination: Path, filter_chain: s
     ]
 
 
+def preservation_command(ffmpeg: str, source: Path, destination: Path) -> list[str]:
+    """Remux healthy capture audio without decoding or re-encoding it.
+
+    ``-c:a copy`` keeps the AAC access units intact.  A later packet-hash
+    verification makes that preservation contractual rather than merely an
+    FFmpeg command-line intention.
+    """
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v?",
+        "-map",
+        "0:a:0",
+        "-map",
+        "0:s?",
+        "-map_metadata",
+        "0",
+        "-map_chapters",
+        "0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-c:s",
+        "copy",
+        "-fflags",
+        "+bitexact",
+        "-movflags",
+        "+faststart",
+        str(destination),
+    ]
+
+
 def run_checked(command: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(
@@ -341,7 +405,7 @@ def probe_media(ffprobe: str, path: Path) -> dict[str, Any]:
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=index,codec_type,codec_name,codec_tag_string,width,height,pix_fmt,avg_frame_rate,sample_rate,channels",
+            "format=duration:stream=index,codec_type,codec_name,codec_tag_string,profile,width,height,pix_fmt,avg_frame_rate,sample_rate,channels,channel_layout,bit_rate",
             "-of",
             "json",
             str(path),
@@ -359,6 +423,39 @@ def stream_list(probe: dict[str, Any], stream_type: str) -> list[dict[str, Any]]
         stream for stream in probe.get("streams", [])
         if isinstance(stream, dict) and stream.get("codec_type") == stream_type
     ]
+
+
+def audio_mastering_decision(source_probe: dict[str, Any]) -> AudioMasteringDecision:
+    """Select lossless pass-through only for a healthy high-quality source.
+
+    The policy is deliberately structural rather than branded-device-specific:
+    any 44.1/48 kHz+ stereo source with sufficient bitrate is preserved.  This
+    means the Meta Oakley Vanguard originals qualify without applying a
+    potentially destructive mono speech-cleanup profile, while low-rate mono
+    body-camera audio remains eligible for restoration.
+    """
+    audio_streams = stream_list(source_probe, "audio")
+    if len(audio_streams) != 1:
+        return AudioMasteringDecision("restore", "source does not contain exactly one audio stream")
+
+    audio = audio_streams[0]
+    try:
+        sample_rate = int(audio.get("sample_rate") or 0)
+        channels = int(audio.get("channels") or 0)
+        bitrate = int(audio.get("bit_rate") or 0)
+    except (TypeError, ValueError):
+        return AudioMasteringDecision("restore", "source audio metadata is incomplete")
+
+    if sample_rate < PRESERVE_MIN_SAMPLE_RATE:
+        return AudioMasteringDecision("restore", f"sample rate {sample_rate} Hz is below preservation threshold")
+    if channels < PRESERVE_MIN_CHANNELS:
+        return AudioMasteringDecision("restore", f"{channels}-channel source is below preservation threshold")
+    if bitrate < PRESERVE_MIN_BITRATE:
+        return AudioMasteringDecision("restore", f"audio bitrate {bitrate} is below preservation threshold")
+    return AudioMasteringDecision(
+        "preserve",
+        f"healthy {sample_rate} Hz, {channels}-channel, {bitrate} b/s source audio",
+    )
 
 
 def duration_seconds(probe: dict[str, Any]) -> float:
@@ -395,6 +492,67 @@ def validate_restored_media(source_probe: dict[str, Any], restored_probe: dict[s
     restored_duration = duration_seconds(restored_probe)
     if abs(source_duration - restored_duration) > 0.35:
         raise RestorationError("restored output duration differs from the source")
+
+
+def validate_preserved_media(source_probe: dict[str, Any], preserved_probe: dict[str, Any]) -> None:
+    """Validate remuxed source audio without accepting an audio downgrade."""
+    source_video = stream_list(source_probe, "video")
+    preserved_video = stream_list(preserved_probe, "video")
+    if not source_video or len(source_video) != len(preserved_video):
+        raise RestorationError("preserved output does not retain every video stream")
+    for original, preserved in zip(source_video, preserved_video):
+        original_identity = tuple(original.get(field) for field in VIDEO_IDENTITY_FIELDS)
+        preserved_identity = tuple(preserved.get(field) for field in VIDEO_IDENTITY_FIELDS)
+        if original_identity != preserved_identity:
+            raise RestorationError("preserved output changed a copied video stream")
+
+    source_audio = stream_list(source_probe, "audio")
+    preserved_audio = stream_list(preserved_probe, "audio")
+    if len(source_audio) != 1 or len(preserved_audio) != 1:
+        raise RestorationError("preserved output does not retain exactly one audio stream")
+    original_identity = tuple(source_audio[0].get(field) for field in AUDIO_IDENTITY_FIELDS)
+    preserved_identity = tuple(preserved_audio[0].get(field) for field in AUDIO_IDENTITY_FIELDS)
+    if original_identity != preserved_identity:
+        raise RestorationError("preserved output changed source audio metadata")
+
+    source_duration = duration_seconds(source_probe)
+    preserved_duration = duration_seconds(preserved_probe)
+    if abs(source_duration - preserved_duration) > 0.35:
+        raise RestorationError("preserved output duration differs from the source")
+
+
+def encoded_audio_packet_hashes(ffprobe: str, path: Path) -> tuple[str, ...]:
+    """Return SHA-256 values for the encoded packets in the first audio stream.
+
+    FFprobe hashes each packet payload without decoding it.  Equality proves a
+    stream-copy remux did not alter the original encoded audio data, unlike a
+    comparison of decoded waveforms which could miss a lossy re-encode.
+    """
+    completed = run_checked(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "packet=data_hash",
+            "-show_data_hash",
+            "sha256",
+            "-of",
+            "compact=p=0:nk=1",
+            str(path),
+        ],
+        timeout=120,
+    )
+    hashes = tuple(
+        line.split("SHA256:", 1)[1].strip()
+        for line in completed.stdout.splitlines()
+        if "SHA256:" in line
+    )
+    if not hashes:
+        raise RestorationError("FFprobe did not find encoded audio packets to hash")
+    return hashes
 
 
 def acquire_lock(destination: Path) -> Path:
@@ -463,18 +621,33 @@ def restore(
     if not stream_list(source_probe, "audio"):
         raise RestorationError("source recording has no audio stream to restore")
     duration_seconds(source_probe)
+    decision = audio_mastering_decision(source_probe)
 
-    plan = plan_for(
-        source,
-        destination,
-        available_filters=available_filters,
-        mains_hz=mains_hz,
-        repair_clicks=repair_clicks,
-        denoise=denoise,
-    )
+    plan: AudioRestorationPlan | None = None
+    source_packet_hashes: tuple[str, ...] | None = None
+    if decision.mode == "preserve":
+        source_packet_hashes = encoded_audio_packet_hashes(ffprobe, source)
+    else:
+        plan = plan_for(
+            source,
+            destination,
+            available_filters=available_filters,
+            mains_hz=mains_hz,
+            repair_clicks=repair_clicks,
+            denoise=denoise,
+        )
+
+    def validate_output(output_probe: dict[str, Any], output_path: Path) -> None:
+        if decision.mode == "preserve":
+            validate_preserved_media(source_probe, output_probe)
+            if encoded_audio_packet_hashes(ffprobe, output_path) != source_packet_hashes:
+                raise RestorationError("preserved output changed encoded audio packets")
+        else:
+            validate_restored_media(source_probe, output_probe)
+
     if destination.exists() and not overwrite:
         restored_probe = probe_media(ffprobe, destination)
-        validate_restored_media(source_probe, restored_probe)
+        validate_output(restored_probe, destination)
         return "already-restored"
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -487,26 +660,30 @@ def restore(
         # creation; never overwrite it unless explicitly requested.
         if destination.exists() and not overwrite:
             restored_probe = probe_media(ffprobe, destination)
-            validate_restored_media(source_probe, restored_probe)
+            validate_output(restored_probe, destination)
             return "already-restored"
 
-        measured_run = run_checked(
-            measure_command(ffmpeg, source, plan.second_pass_prefix), timeout=900
-        )
-        try:
-            measured = parse_loudnorm_measurement(measured_run.stderr)
-            apply_filter = loudnorm_apply_filter(plan.second_pass_prefix, measured)
-        except RestorationError as exc:
-            if not str(exc).startswith("non-finite loudness measurement"):
-                raise
-            # A silent interval has no usable LUFS target. Preserve it as
-            # silence rather than falling back to an unmastered 16 kHz file.
-            apply_filter = quiet_input_filter(plan.second_pass_prefix)
-        run_checked(render_command(ffmpeg, source, temporary, apply_filter), timeout=1_800)
+        if decision.mode == "preserve":
+            run_checked(preservation_command(ffmpeg, source, temporary), timeout=1_800)
+        else:
+            assert plan is not None  # Keeps static analyzers honest about the branch above.
+            measured_run = run_checked(
+                measure_command(ffmpeg, source, plan.second_pass_prefix), timeout=900
+            )
+            try:
+                measured = parse_loudnorm_measurement(measured_run.stderr)
+                apply_filter = loudnorm_apply_filter(plan.second_pass_prefix, measured)
+            except RestorationError as exc:
+                if not str(exc).startswith("non-finite loudness measurement"):
+                    raise
+                # A silent interval has no usable LUFS target. Preserve it as
+                # silence rather than falling back to an unmastered 16 kHz file.
+                apply_filter = quiet_input_filter(plan.second_pass_prefix)
+            run_checked(render_command(ffmpeg, source, temporary, apply_filter), timeout=1_800)
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise RestorationError("FFmpeg did not create an output recording")
         restored_probe = probe_media(ffprobe, temporary)
-        validate_restored_media(source_probe, restored_probe)
+        validate_output(restored_probe, temporary)
         os.replace(temporary, destination)
         return "created"
     finally:
@@ -534,34 +711,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         ffmpeg = command_path("ffmpeg")
         ffprobe = command_path("ffprobe")
         available = installed_filters(ffmpeg)
-        plan = plan_for(
-            source,
-            destination,
-            available_filters=available,
-            mains_hz=args.mains_hz,
-            repair_clicks=not args.no_decrackle,
-            denoise=not args.no_denoise,
-        )
         if args.dry_run:
-            print(json.dumps({
+            source_probe = probe_media(ffprobe, source)
+            decision = audio_mastering_decision(source_probe)
+            details: dict[str, Any] = {
                 "source": str(source),
                 "output": str(destination),
-                "mains_hz": plan.mains_hz,
-                "optional_repairs": list(plan.enabled_optional_filters),
-                "measure_command": measure_command(ffmpeg, source, plan.second_pass_prefix),
-                "render_command_template": render_command(
-                    ffmpeg,
+                "audio_mode": decision.mode,
+                "reason": decision.reason,
+            }
+            if decision.mode == "preserve":
+                details["render_command"] = preservation_command(ffmpeg, source, destination)
+            else:
+                plan = plan_for(
                     source,
                     destination,
-                    loudnorm_apply_filter(plan.second_pass_prefix, {
-                        "input_i": -24.0,
-                        "input_lra": 7.0,
-                        "input_tp": -6.0,
-                        "input_thresh": -34.0,
-                        "target_offset": 0.0,
-                    }),
-                ),
-            }, indent=2))
+                    available_filters=available,
+                    mains_hz=args.mains_hz,
+                    repair_clicks=not args.no_decrackle,
+                    denoise=not args.no_denoise,
+                )
+                details.update({
+                    "mains_hz": plan.mains_hz,
+                    "optional_repairs": list(plan.enabled_optional_filters),
+                    "measure_command": measure_command(ffmpeg, source, plan.second_pass_prefix),
+                    "render_command_template": render_command(
+                        ffmpeg,
+                        source,
+                        destination,
+                        loudnorm_apply_filter(plan.second_pass_prefix, {
+                            "input_i": -24.0,
+                            "input_lra": 7.0,
+                            "input_tp": -6.0,
+                            "input_thresh": -34.0,
+                            "target_offset": 0.0,
+                        }),
+                    ),
+                })
+            print(json.dumps(details, indent=2))
             return 0
 
         state = restore(
@@ -575,12 +762,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             denoise=not args.no_denoise,
             overwrite=args.overwrite,
         )
+        source_probe = probe_media(ffprobe, source)
+        decision = audio_mastering_decision(source_probe)
         print(json.dumps({
             "status": state,
             "source": str(source),
             "output": str(destination),
-            "profile": "speech-safe-offline-v1",
-            "optional_repairs": list(plan.enabled_optional_filters),
+            "profile": (
+                "encoded-audio-passthrough-v1"
+                if decision.mode == "preserve"
+                else "speech-safe-offline-v1"
+            ),
+            "audio_mode": decision.mode,
+            "reason": decision.reason,
         }))
         return 0
     except RestorationError as exc:
