@@ -41,6 +41,7 @@ ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 RECONNECT_SECONDS = 2.0
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
+ANALYTICS_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,108 @@ class LocalRecordingChunk:
     size_bytes: int
 
 
+def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Create the same lightweight, video-derived product signals as the local UI.
+
+    This stays on the laptop that holds the camera/video file.  The public
+    relay receives the compact JSON result, never the raw sampled frames.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        raise RuntimeError("ffmpeg and ffprobe are required for archive analytics")
+    probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True,
+        timeout=60,
+    )
+    duration = float(probe.stdout.decode(errors="replace").strip())
+    if duration <= 0:
+        raise RuntimeError("stitched recording has no measurable duration")
+
+    # At most 180 grayscale frames: enough to preserve the profile while
+    # keeping analysis quick for both a short demo and a long field session.
+    sample_fps = min(1.0, max(0.05, 180.0 / duration))
+    width, height = 64, 36
+    frame_bytes = width * height
+    sampled = subprocess.run(
+        [
+            ffmpeg, "-v", "error", "-i", str(path),
+            "-vf", f"fps={sample_fps:.6f},scale={width}:{height}:flags=area:out_range=full,format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
+        ],
+        capture_output=True,
+        timeout=240,
+    )
+    if sampled.returncode != 0:
+        raise RuntimeError(sampled.stderr.decode(errors="replace").strip()[-300:] or "ffmpeg could not sample video")
+    raw = sampled.stdout
+    frame_count = len(raw) // frame_bytes
+    if frame_count == 0:
+        raise RuntimeError("ffmpeg returned no analyzable frames")
+
+    samples: list[dict[str, float]] = []
+    previous: bytes | None = None
+    for index in range(frame_count):
+        frame = raw[index * frame_bytes:(index + 1) * frame_bytes]
+        luminance = sum(frame) / (frame_bytes * 255.0) * 100.0
+        if previous is None:
+            motion = 0.0
+        else:
+            mean_delta = sum(abs(current - prior) for current, prior in zip(frame, previous)) / frame_bytes
+            motion = min(100.0, mean_delta / 255.0 * 200.0 / (1.0 / sample_fps))
+        previous = frame
+        lighting = max(0.0, 100.0 - abs(luminance - 50.0) * 2.2)
+        stability = max(0.0, 100.0 - motion)
+        quality = lighting * 0.55 + stability * 0.45
+        samples.append({
+            "time": round(min(duration, (index + 0.5) / sample_fps), 2),
+            "motion": round(motion, 1),
+            "luminance": round(luminance, 1),
+            "lighting": round(lighting, 1),
+            "stability": round(stability, 1),
+            "quality": round(quality, 1),
+        })
+
+    motion_samples = samples[1:] if len(samples) > 1 else samples
+    motions = sorted(sample["motion"] for sample in motion_samples)
+    p95_index = min(len(motions) - 1, int(len(motions) * 0.95))
+    return {
+        "schema_version": ANALYTICS_SCHEMA_VERSION,
+        "generated_at": time.time(),
+        "session_id": str(metadata["session_id"]),
+        "clip": {
+            "id": str(metadata["session_id"]),
+            "name": str(metadata.get("source") or "Sam Cam recording"),
+            "duration": round(duration, 2),
+        },
+        "sample_fps": round(sample_fps, 4),
+        "samples": samples,
+        "summary": {
+            "average_motion": round(sum(sample["motion"] for sample in motion_samples) / len(motion_samples), 1),
+            "peak_motion_p95": motions[p95_index],
+            "average_lighting": round(sum(sample["lighting"] for sample in samples) / len(samples), 1),
+            "average_quality": round(sum(sample["quality"] for sample in samples) / len(samples), 1),
+            "stable_share": round(100.0 * sum(sample["motion"] < 25 for sample in motion_samples) / len(motion_samples), 1),
+        },
+        "device": {
+            "asin": "B08KY7KLPB",
+            "weight_grams": 89.9,
+            "battery_capacity_mah": 800,
+            "nominal_runtime_minutes": 270,
+            "claimed_runtime_range_minutes": [240, 360],
+            "storage_gb": 128,
+            "field_of_view_degrees": 90,
+        },
+        "method": {
+            "video_derived": ["video duration", "sampled frame luminance", "sampled frame-to-frame motion"],
+            "model_assumptions": ["lighting quality favors mid-range luminance", "capture index weights lighting 55% and stability 45%"],
+            "estimated": ["battery remaining and ETA", "effective worn load and neck torque", "ergonomic and market-fit scores"],
+            "limitations": ["battery values are listing-based estimates, not telemetry", "motion is a frame-difference index, not physical acceleration", "ergonomic and suitability scores are unvalidated scenario models"],
+        },
+    }
+
+
 class SessionArchiver:
     """Write JPEGs into short files, encode them off the live-path, and retain them."""
 
@@ -77,9 +180,11 @@ class SessionArchiver:
         self.active_segment_frames = 0
         self.encoding: dict[str, set[threading.Thread]] = {}
         self.stitching: dict[str, threading.Thread] = {}
+        self.analyzing: dict[str, threading.Thread] = {}
         self.uploaded: set[tuple[str, int]] = set()
         self.uploaded_recording_chunks: set[tuple[str, int]] = set()
         self.completed_recording_uploads: set[str] = set()
+        self.uploaded_analytics: set[str] = set()
         self.errors: list[str] = []
 
     @staticmethod
@@ -97,6 +202,10 @@ class SessionArchiver:
     @staticmethod
     def _recording_path(session_dir: Path) -> Path:
         return session_dir / "recording.mp4"
+
+    @staticmethod
+    def _analytics_path(session_dir: Path) -> Path:
+        return session_dir / "analytics.json"
 
     def _write_metadata(self, session_dir: Path, metadata: dict[str, Any]) -> None:
         target = self._metadata_path(session_dir)
@@ -254,6 +363,8 @@ class SessionArchiver:
             temporary.unlink(missing_ok=True)
             with self.lock:
                 self.stitching.pop(session_id, None)
+                if output.exists() and output.stat().st_size > 0:
+                    self._schedule_analysis_locked(metadata)
 
     def _schedule_stitch_locked(self, metadata: dict[str, Any]) -> None:
         session_id = str(metadata["session_id"])
@@ -270,11 +381,56 @@ class SessionArchiver:
         self.stitching[session_id] = thread
         thread.start()
 
+    def _analyze_recording(self, metadata: dict[str, Any]) -> None:
+        session_id = str(metadata["session_id"])
+        session_dir = self.root / session_id
+        output = self._recording_path(session_dir)
+        analytics_path = self._analytics_path(session_dir)
+        temporary = analytics_path.with_name(f"{analytics_path.name}.part")
+        try:
+            if analytics_path.exists() and analytics_path.stat().st_size > 0:
+                return
+            if not output.exists() or output.stat().st_size <= 0:
+                return
+            result = analyze_recording(output, metadata)
+            temporary.write_text(json.dumps(result, separators=(",", ":")))
+            temporary.replace(analytics_path)
+        except Exception as exc:  # noqa: BLE001 - analytics never block recording delivery
+            with self.lock:
+                self.errors.append(f"archive analytics {session_id}: {exc}"[-600:])
+                del self.errors[:-10]
+        finally:
+            temporary.unlink(missing_ok=True)
+            with self.lock:
+                self.analyzing.pop(session_id, None)
+
+    def _schedule_analysis_locked(self, metadata: dict[str, Any]) -> None:
+        session_id = str(metadata["session_id"])
+        session_dir = self.root / session_id
+        output = self._recording_path(session_dir)
+        analytics_path = self._analytics_path(session_dir)
+        if (
+            session_id in self.analyzing
+            or (analytics_path.exists() and analytics_path.stat().st_size > 0)
+            or not output.exists()
+            or output.stat().st_size <= 0
+        ):
+            return
+        thread = threading.Thread(
+            target=self._analyze_recording,
+            args=(dict(metadata),),
+            daemon=True,
+            name=f"samcam-analytics-{session_id[-8:]}",
+        )
+        self.analyzing[session_id] = thread
+        thread.start()
+
     def schedule_completed_recordings(self) -> None:
         for metadata in self.manifests():
             if metadata.get("ended_at"):
                 with self.lock:
                     self._schedule_stitch_locked(metadata)
+                    self._schedule_analysis_locked(metadata)
 
     def start(self, worker: str, source: str | None) -> dict[str, Any]:
         with self.lock:
@@ -350,6 +506,7 @@ class SessionArchiver:
             self.uploaded.clear()
             self.uploaded_recording_chunks.clear()
             self.completed_recording_uploads.clear()
+            self.uploaded_analytics.clear()
 
     def wait_for_encoding(self, timeout: float = 180.0) -> None:
         """Finish MP4 and stitched-recording work before a graceful shutdown."""
@@ -358,6 +515,7 @@ class SessionArchiver:
             with self.lock:
                 threads = [thread for group in self.encoding.values() for thread in group]
                 threads.extend(self.stitching.values())
+                threads.extend(self.analyzing.values())
             if not threads:
                 return
             for thread in threads:
@@ -473,6 +631,26 @@ class SessionArchiver:
         with self.lock:
             self.completed_recording_uploads.add(session_id)
 
+    def next_analytics(self) -> tuple[str, dict[str, Any]] | None:
+        for metadata in sorted(self.manifests(), key=lambda item: -float(item.get("started_at") or 0)):
+            if not metadata.get("ended_at"):
+                continue
+            session_id = str(metadata["session_id"])
+            if session_id in self.uploaded_analytics:
+                continue
+            path = self._analytics_path(self.root / session_id)
+            try:
+                result = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(result, dict) and isinstance(result.get("samples"), list):
+                return session_id, result
+        return None
+
+    def mark_analytics_uploaded(self, session_id: str) -> None:
+        with self.lock:
+            self.uploaded_analytics.add(session_id)
+
 
 def relay_websocket_url() -> str:
     parsed = urlsplit(RELAY_URL)
@@ -515,6 +693,17 @@ async def sync_archive_index(archiver: SessionArchiver, send: Any, exclude_sessi
             "session_id": metadata["session_id"],
             "lines": archiver.transcript_lines(str(metadata["session_id"])),
         })
+        analytics_path = archiver._analytics_path(archiver.root / str(metadata["session_id"]))
+        try:
+            analytics = json.loads(analytics_path.read_text())
+        except (OSError, ValueError):
+            analytics = None
+        if isinstance(analytics, dict):
+            await send({
+                "type": "archive_analytics",
+                "session_id": metadata["session_id"],
+                "analytics": analytics,
+            })
 
 
 async def upload_next_segment(archiver: SessionArchiver, send: Any) -> bool:
@@ -580,6 +769,15 @@ async def publish_completed_recording(archiver: SessionArchiver, send: Any) -> N
         "size_bytes": size_bytes,
     })
     archiver.mark_recording_complete(session_id)
+
+
+async def publish_next_analytics(archiver: SessionArchiver, send: Any) -> None:
+    pending = archiver.next_analytics()
+    if pending is None:
+        return
+    session_id, analytics = pending
+    await send({"type": "archive_analytics", "session_id": session_id, "analytics": analytics})
+    archiver.mark_analytics_uploaded(session_id)
 
 
 async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asyncio.Event, archiver: SessionArchiver) -> None:
@@ -657,6 +855,7 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
         if not segment_uploaded:
             await upload_next_recording_chunk(archiver, send)
             await publish_completed_recording(archiver, send)
+            await publish_next_analytics(archiver, send)
         try:
             await asyncio.wait_for(stop.wait(), timeout=1.0)
         except asyncio.TimeoutError:

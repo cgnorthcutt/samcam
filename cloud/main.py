@@ -82,6 +82,7 @@ class ArchiveStore:
         self.memory_recording_chunks: dict[tuple[str, int], dict[str, Any]] = {}
         self.memory_recordings: dict[str, dict[str, Any]] = {}
         self.memory_transcripts: dict[tuple[str, str], dict[str, Any]] = {}
+        self.memory_analytics: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         database_url = os.environ.get("DATABASE_URL")
@@ -135,6 +136,12 @@ class ArchiveStore:
                         chunk_count INTEGER NOT NULL,
                         size_bytes BIGINT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS samcam_archive_analytics (
+                        session_id TEXT PRIMARY KEY REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                        payload JSONB NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
                     CREATE INDEX IF NOT EXISTS samcam_archive_sessions_worker_idx
                         ON samcam_archive_sessions (worker_name, started_at DESC);
@@ -319,6 +326,80 @@ class ArchiveStore:
             self.error = f"archive recording completion failed: {exc}"[-300:]
             print(self.error, flush=True)
 
+    async def save_analytics(self, session_id: str, payload: dict[str, Any]) -> None:
+        """Store video-derived per-session analytics sent by the local publisher."""
+        session_id = require_session_id(session_id)
+        samples = payload.get("samples")
+        clip = payload.get("clip")
+        if not isinstance(samples, list) or not samples or len(samples) > 500 or not isinstance(clip, dict):
+            return
+        try:
+            serialized = json.dumps(payload, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return
+        if len(serialized.encode()) > 1_000_000:
+            return
+        self.memory_analytics[session_id] = payload
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO samcam_archive_analytics (session_id, payload)
+                    VALUES ($1, $2::jsonb)
+                    ON CONFLICT (session_id) DO UPDATE SET
+                      payload = EXCLUDED.payload,
+                      updated_at = NOW()
+                    """,
+                    session_id, serialized,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive analytics write failed: {exc}"[-300:]
+            print(self.error, flush=True)
+
+    async def analytics(self, session_id: str) -> dict[str, Any] | None:
+        session_id = require_session_id(session_id)
+        if self.pool is None:
+            return self.memory_analytics.get(session_id)
+        try:
+            async with self.pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    "SELECT payload FROM samcam_archive_analytics WHERE session_id = $1", session_id
+                )
+            if row is None:
+                return None
+            payload = row["payload"]
+            return dict(payload) if isinstance(payload, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive analytics read failed: {exc}"[-300:]
+            print(self.error, flush=True)
+            return None
+
+    async def delete_session(self, session_id: str) -> None:
+        """Permanently remove one archived session and all of its artifacts."""
+        session_id = require_session_id(session_id)
+        self.memory_sessions.pop(session_id, None)
+        self.memory_recordings.pop(session_id, None)
+        self.memory_analytics.pop(session_id, None)
+        self.memory_segments = {
+            key: value for key, value in self.memory_segments.items() if key[0] != session_id
+        }
+        self.memory_recording_chunks = {
+            key: value for key, value in self.memory_recording_chunks.items() if key[0] != session_id
+        }
+        self.memory_transcripts = {
+            key: value for key, value in self.memory_transcripts.items() if key[0] != session_id
+        }
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as connection:
+                await connection.execute("DELETE FROM samcam_archive_sessions WHERE session_id = $1", session_id)
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive deletion failed: {exc}"[-300:]
+            print(self.error, flush=True)
+
     async def recording(self, session_id: str) -> dict[str, Any] | None:
         session_id = require_session_id(session_id)
         if self.pool is None:
@@ -455,6 +536,7 @@ class ArchiveStore:
             "recording_ready": recording is not None,
             "recording_size_bytes": int(recording["size_bytes"]) if recording else 0,
             "transcript_count": len(transcripts),
+            "analytics_ready": session_id in self.memory_analytics,
         }
 
     async def list_sessions(self, worker_name: str) -> list[dict[str, Any]]:
@@ -464,7 +546,11 @@ class ArchiveStore:
                     self._memory_summary(record)
                     for record in self.memory_sessions.values()
                     if record["worker_name"].casefold() == worker_name.casefold()
-                    and (record.get("ended_at") is None or any(candidate == record["session_id"] for candidate, _ in self.memory_segments))
+                    and (
+                        record.get("ended_at") is None
+                        or any(candidate == record["session_id"] for candidate, _ in self.memory_segments)
+                        or record["session_id"] in self.memory_recordings
+                    )
                 ],
                 key=lambda item: float(item["started_at"]), reverse=True,
             )
@@ -477,11 +563,14 @@ class ArchiveStore:
                       COALESCE((SELECT SUM(g.size_bytes) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS size_bytes,
                       EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
                       COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
+                      EXISTS(SELECT 1 FROM samcam_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready,
                       COALESCE((SELECT COUNT(*) FROM samcam_archive_transcripts t WHERE t.session_id = s.session_id), 0) AS transcript_count
                     FROM samcam_archive_sessions s
                     WHERE LOWER(s.worker_name) = LOWER($1)
                       AND (s.ended_at IS NULL OR EXISTS (
                         SELECT 1 FROM samcam_archive_segments g WHERE g.session_id = s.session_id
+                      ) OR EXISTS (
+                        SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id
                       ))
                     ORDER BY s.started_at DESC
                     LIMIT 100
@@ -519,7 +608,8 @@ class ArchiveStore:
                     """
                     SELECT s.session_id, s.worker_name, s.source, s.started_at, s.ended_at,
                       EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
-                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes
+                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
+                      EXISTS(SELECT 1 FROM samcam_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready
                     FROM samcam_archive_sessions s
                     WHERE s.session_id = $1
                     """,
@@ -863,6 +953,17 @@ async def archive_detail(session_id: str) -> JSONResponse:
     return JSONResponse(detail, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/archive/{session_id}/analytics")
+async def archive_analytics(session_id: str) -> JSONResponse:
+    try:
+        payload = await archive.analytics(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(status_code=404, detail="video analytics are not ready")
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/archive/{session_id}/segment/{sequence}.mp4")
 async def archive_segment(session_id: str, sequence: int) -> Response:
     try:
@@ -1002,6 +1103,18 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
                 try:
                     lines = [line for line in payload["lines"] if isinstance(line, dict)]
                     await archive.replace_transcript(require_session_id(payload.get("session_id")), lines)
+                except ValueError:
+                    pass
+            elif kind == "archive_analytics" and isinstance(payload.get("analytics"), dict):
+                try:
+                    await archive.save_analytics(
+                        require_session_id(payload.get("session_id")), payload["analytics"]
+                    )
+                except ValueError:
+                    pass
+            elif kind == "archive_delete":
+                try:
+                    await archive.delete_session(require_session_id(payload.get("session_id")))
                 except ValueError:
                     pass
             elif kind == "archive_recording_complete":
