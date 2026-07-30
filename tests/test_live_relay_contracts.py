@@ -185,10 +185,19 @@ class PublicAudioUiContracts(unittest.TestCase):
     def test_public_audio_is_guarded_without_a_flickering_status_label(self) -> None:
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
 
-        self.assertIn("audioHighPass.frequency.value=120", page)
-        self.assertIn("audioLowPass.frequency.value=2800", page)
+        # Source packets must go through the full graph. Connecting straight
+        # to the compressor bypasses the configured filters and was the cause
+        # of the screechy, unfiltered public playback.
+        self.assertIn("source.connect(packetGain).connect(audioFeedbackAnalyser)", page)
+        self.assertNotIn("source.connect(audioLimiter)", page)
+        self.assertIn("audioHighPass.frequency.value=160", page)
+        self.assertIn("audioLowPass.frequency.value=3200", page)
         self.assertIn("audioLimiter.ratio.value=20", page)
         self.assertIn("audioMasterGain.gain.value=LIVE_AUDIO_SPEAKER_GAIN", page)
+        self.assertIn("LIVE_AUDIO_CROSSFADE_SECONDS", page)
+        self.assertIn("audioLastSequence>=0 && sequence<=audioLastSequence", page)
+        self.assertIn("inspectFeedbackTone", page)
+        self.assertIn("LIVE_AUDIO_TONE_STABILITY_HZ", page)
         self.assertNotIn('id="audioStatus"', page)
         self.assertIn('<span class="hint">Public demo feed</span>', page)
 
