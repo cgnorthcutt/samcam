@@ -633,22 +633,54 @@ do {
 
 private let stopped = DispatchSemaphore(value: 0)
 private let signalQueue = DispatchQueue(label: "bodycam.capture.signals")
+private let stopLock = NSLock()
+private var stopRequested = false
+
+private func stopCapture() {
+    stopLock.lock()
+    defer { stopLock.unlock() }
+    guard !stopRequested else { return }
+    stopRequested = true
+    capture.stop()
+    stopped.signal()
+}
 
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 
 private let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
 interruptSource.setEventHandler {
-    capture.stop()
-    stopped.signal()
+    stopCapture()
 }
 interruptSource.resume()
 
 private let terminateSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
 terminateSource.setEventHandler {
-    capture.stop()
-    stopped.signal()
+    stopCapture()
 }
 terminateSource.resume()
+
+// If Python is killed before it can signal us, macOS reparents this helper to
+// launchd.  An orphaned AVCapture session can keep GENERAL - UVC's video
+// interface locked while still allowing a replacement helper to receive audio.
+// The parent PID is supplied by server.py; direct standalone use stays valid.
+private let expectedParentPID = Int32(
+    ProcessInfo.processInfo.environment["BODYCAM_PARENT_PID"] ?? ""
+) ?? 0
+private let parentWatchdog: DispatchSourceTimer? = {
+    guard expectedParentPID > 1 else { return nil }
+    let timer = DispatchSource.makeTimerSource(queue: signalQueue)
+    timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+    timer.setEventHandler {
+        if getppid() != expectedParentPID {
+            diagnostics.log(
+                "Parent process disappeared (expected \(expectedParentPID), now \(getppid())); stopping capture"
+            )
+            stopCapture()
+        }
+    }
+    timer.resume()
+    return timer
+}()
 
 stopped.wait()

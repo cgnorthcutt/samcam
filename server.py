@@ -18,6 +18,8 @@ import os
 import queue
 import re
 import shutil
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -61,6 +63,77 @@ NATIVE_CAPTURE = HERE / "bodycam_capture"
 TRANSCRIBE_MODEL = os.environ.get(
     "BODYCAM_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"
 )
+
+
+def reap_orphaned_native_helpers() -> list[int]:
+    """Stop stale ``bodycam_capture`` children left behind by a crashed server.
+
+    AVCapture holds the UVC video interface open per process.  If a Python
+    server is terminated before it runs its capture cleanup, its helper is
+    re-parented to launchd (PPID 1) and can leave the next helper with audio
+    but no video frames.  Only reap an *exact* helper binary owned by this
+    project and only when it is already orphaned; never touch another camera
+    client or an intentionally running server child.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    target = NATIVE_CAPTURE.resolve()
+    orphans: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        pid_text, parent_text, command = fields
+        if parent_text != "1":
+            continue
+        try:
+            pid = int(pid_text)
+            argv = shlex.split(command)
+            executable = Path(argv[0]).resolve() if argv else None
+        except (ValueError, OSError, IndexError):
+            continue
+        if pid != os.getpid() and executable == target:
+            orphans.append(pid)
+
+    for pid in orphans:
+        try:
+            print(f"  reaping orphaned native camera helper pid={pid}", file=sys.stderr)
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            print(f"  cannot reap native helper pid={pid}", file=sys.stderr)
+
+    # Give AVCapture a brief chance to release its device before opening a new
+    # session.  Escalate only the exact stale helper if it ignores SIGTERM.
+    deadline = time.monotonic() + 1.5
+    remaining = set(orphans)
+    while remaining and time.monotonic() < deadline:
+        for pid in tuple(remaining):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                remaining.discard(pid)
+            except PermissionError:
+                remaining.discard(pid)
+        if remaining:
+            time.sleep(0.05)
+    for pid in remaining:
+        try:
+            print(f"  force-stopping stuck native camera helper pid={pid}", file=sys.stderr)
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return orphans
 
 
 # --------------------------------------------------------------------------
@@ -591,6 +664,8 @@ class Streamer:
         self.last_live_frame_at: float | None = None
         self.live_retry_delay = LIVE_RETRY_INITIAL
         self.stopping = threading.Event()
+        self._native_process_lock = threading.Lock()
+        self._native_process: subprocess.Popen[bytes] | None = None
 
     # -- lifecycle -------------------------------------------------------
     def ensure_running(self) -> None:
@@ -602,7 +677,45 @@ class Streamer:
 
     def stop(self) -> None:
         self.stopping.set()
+        # Do not rely on the producer thread getting another scheduling slice
+        # before a server shutdown.  Explicitly signal the native helper so it
+        # releases AVFoundation before the Python parent exits.
+        with self._native_process_lock:
+            native_process = self._native_process
+        if native_process is not None:
+            self._stop_native_process(native_process)
         self.clear_frame()
+
+    @staticmethod
+    def _stop_native_process(proc: subprocess.Popen[bytes]) -> None:
+        """End one native helper and, if needed, its dedicated process group."""
+        if proc.poll() is not None:
+            return
+        try:
+            # The helper is started in a new session, so this cannot signal
+            # the server or a terminal that happens to own the server.
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                return
+        try:
+            proc.wait(timeout=2)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
 
     def publish(self, jpeg: bytes) -> None:
         with self.condition:
@@ -784,13 +897,23 @@ class Streamer:
 
     def _capture_native(self) -> None:
         """Read interleaved JPEG/PCM packets from one native AVCaptureSession."""
+        # A previous server crash can leave one helper parented by launchd.
+        # Reap it before opening AVCapture, otherwise UVC may provide audio
+        # while withholding every video frame from this new session.
+        reap_orphaned_native_helpers()
         proc = subprocess.Popen(
             [str(NATIVE_CAPTURE)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            # The helper has no children today, but an isolated group gives us
+            # a reliable teardown boundary if that ever changes.
+            start_new_session=True,
+            env=os.environ | {"BODYCAM_PARENT_PID": str(os.getpid())},
         )
+        with self._native_process_lock:
+            self._native_process = proc
         errors: deque[str] = deque(maxlen=30)
         frames: queue.Queue[bytes | None] = queue.Queue(maxsize=3)
         audio_bytes = 0
@@ -896,12 +1019,10 @@ class Streamer:
                     detail = f"native helper exited with status {proc.poll()}"
                 raise RuntimeError(detail)
         finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            self._stop_native_process(proc)
+            with self._native_process_lock:
+                if self._native_process is proc:
+                    self._native_process = None
             for stream in (proc.stdout, proc.stderr):
                 try:
                     stream.close()
@@ -1823,6 +1944,10 @@ def scanner_loop(library: Library, stop_event: threading.Event) -> None:
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     CACHE.mkdir(exist_ok=True)
+    # Clean up a helper from an interrupted previous run before this process
+    # begins accepting viewers.  That makes a normal restart a camera recovery
+    # action instead of a second competing UVC client.
+    reap_orphaned_native_helpers()
     # Bind before starting MLX or camera processes so a port/permission failure
     # cannot leave background workers behind.
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -1851,11 +1976,26 @@ def main() -> None:
     print(f"  serving  http://localhost:{port}")
     print("  ctrl-c to stop\n")
 
+    shutting_down = threading.Event()
+
+    def request_shutdown(signum, _frame) -> None:
+        """Turn SIGTERM (including a Terminal/app restart) into cleanup."""
+        if shutting_down.is_set():
+            return
+        shutting_down.set()
+        print(f"\n  received {signal.Signals(signum).name}; stopping cleanly", file=sys.stderr)
+        # HTTPServer.shutdown() must run outside serve_forever's thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, request_shutdown)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n  bye")
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         stop_event.set()
         streamer.stop()
         transcriber.stop()
