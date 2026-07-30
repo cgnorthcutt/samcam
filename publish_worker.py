@@ -21,7 +21,9 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 
 LOCAL_URL = os.environ.get("SAMCAM_LOCAL_URL", "http://127.0.0.1:8011").rstrip("/")
-RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam.app").rstrip("/")
+# The worker connects to Render directly.  This avoids depending on custom-DNS
+# propagation for the long-lived WebSocket while viewers keep using samcam.app.
+RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam-relay.onrender.com").rstrip("/")
 WORKER = os.environ.get("SAMCAM_WORKER", "Curtis").strip() or "Curtis"
 RECONNECT_SECONDS = 2.0
 
