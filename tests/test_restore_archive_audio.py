@@ -15,6 +15,7 @@ from restore_archive_audio import (
     parse_available_filters,
     parse_loudnorm_measurement,
     plan_for,
+    quiet_input_filter,
     render_command,
     restoration_filters,
     validate_restored_media,
@@ -74,6 +75,12 @@ class RestoreArchiveAudioTests(unittest.TestCase):
         chain = loudnorm_apply_filter("highpass=f=75", measured)
         self.assertIn("measured_I=-23.120000", chain)
         self.assertIn("offset=0.420000", chain)
+        self.assertTrue(chain.endswith("latency=1"))
+
+    def test_silent_valid_recording_uses_the_limiter_without_invalid_loudness_gain(self) -> None:
+        chain = quiet_input_filter("highpass=f=75,lowpass=f=7200")
+        self.assertNotIn("loudnorm", chain)
+        self.assertIn("alimiter=limit=0.89", chain)
         self.assertTrue(chain.endswith("latency=1"))
 
     def test_render_command_stream_copies_video_and_only_reencodes_audio(self) -> None:

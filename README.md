@@ -145,9 +145,9 @@ While a session is active or just ended:
 - Parts close roughly every **five minutes** by default
   (`SAMCAM_ARCHIVE_SEGMENT_SECONDS=300`). They can appear as playable parts
   before the full session is ready.
-- A background job stitches finished parts into one final MP4. It does not
-  block part playback; the browser can switch to the final recording once it
-  arrives.
+- A background job stitches finished parts into one final MP4, then masters
+  its audio offline before upload. It does not block part playback; the
+  browser can switch to the final recording once it arrives.
 - The publisher uploads the completed MP4 in durable chunks, plus the accepted
   transcript and analytics. Allow this to finish before turning off the laptop
   if the new recording must be available publicly.
@@ -178,16 +178,36 @@ combine those measurements with stated product assumptions. These are planning
 estimates—not device telemetry, medical guidance, market research, or measured
 biomechanics.
 
-### Offline archive audio restoration
+### Archive audio mastering and restoration
 
 Live sound is intentionally optimized for low latency and feedback safety. For
-a finished Archive MP4 that needs a cleaner, presentation-ready speech track,
-use the offline-only helper below on the worker laptop. It copies the existing
-video stream exactly as-is and writes a separate `recording.restored.mp4`; it
-does not change live capture, the relay, or the original archive.
+a newly finished session, the publisher now automatically runs the same
+offline-only speech-mastering profile after stitching and before it uploads the
+final MP4. This never delays Live or the playable archive parts. It copies the
+existing video stream exactly as-is, re-encodes only audio, and falls back to a
+valid stitched MP4 if an optional repair dependency is unavailable.
+
+The automatic profile is enabled by default and can be configured without
+touching live audio:
 
 ```bash
-python3 restore_archive_audio.py archives/SESSION_ID/recording.mp4
+SAMCAM_ARCHIVE_AUDIO_RESTORE=1 \
+SAMCAM_ARCHIVE_AUDIO_MAINS_HZ=60 \
+.venv/bin/python publish_worker.py
+```
+
+`60` removes the 120/180 Hz harmonics of the hum measured on this US demo
+camera. Use `50` where appropriate or `0` when there is no clearly audible
+electrical hum.
+
+For a historical MP4 that needs a cleaner, presentation-ready speech track,
+use the helper below on the worker laptop. It preserves the source file and
+writes a separate output:
+
+```bash
+.venv/bin/python restore_archive_audio.py archives/SESSION_ID/recording.mp4 \
+  --mains-hz 60 \
+  --output archives/SESSION_ID/recording.mastered.mp4
 ```
 
 The deterministic two-pass pass resamples to 48 kHz, removes rumble and
@@ -201,6 +221,19 @@ hum notches are opt-in because they can thin some voices.
 Use `--dry-run` to inspect the exact FFmpeg commands, `--overwrite` only to
 replace an earlier restored output, and see `python3 restore_archive_audio.py
 --help` for the conservative `--no-denoise` and `--no-decrackle` fallbacks.
+
+To replace the matching public archive MP4 without disturbing the Curtis Live
+worker, run the separate maintenance uploader after the output validates:
+
+```bash
+SAMCAM_RELAY_URL=https://samcam.app \
+  .venv/bin/python republish_archive_recording.py SESSION_ID \
+  archives/SESSION_ID/recording.mastered.mp4
+```
+
+Run its `--dry-run` first. The uploader uses a distinct maintenance WebSocket,
+uploads only the finished MP4 chunks, and leaves the Live camera connection
+untouched.
 
 ## Expected public states
 
@@ -243,6 +276,7 @@ cloud/static/index.html   public Live / Archive / Analytics interface
 transcribe_worker.py      persistent local MLX Whisper worker
 import_demo_archives.py   idempotent Meta Oakley demo metadata/media seeder
 purge_archives.py         explicit public archive deletion utility
+republish_archive_recording.py isolated public MP4 replacement utility
 docs/DEMO_RUNBOOK.md      final-demo checklist and recovery guide
 ideas.md                  investigation history and fallback ideas
 ```

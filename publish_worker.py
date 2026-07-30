@@ -28,6 +28,12 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
+from restore_archive_audio import (
+    RestorationError,
+    installed_filters as restoration_filters_available,
+    restore as restore_archive_audio,
+)
+
 HERE = Path(__file__).resolve().parent
 LOCAL_URL = os.environ.get("SAMCAM_LOCAL_URL", "http://127.0.0.1:8011").rstrip("/")
 # Workers use Render directly for their long-lived WebSocket. Viewers use samcam.app.
@@ -56,6 +62,17 @@ ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
     1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
 )
+# Mastering runs only after a session ends, while stitching is already async.
+# It must never sit in the live-video or live-audio path.  The current camera
+# picked up 60 Hz electrical hum, so the US default removes its harmonics; set
+# this to 0 (or 50) for a different environment.
+ARCHIVE_AUDIO_RESTORE_ENABLED = os.environ.get("SAMCAM_ARCHIVE_AUDIO_RESTORE", "1").lower() not in {"0", "false", "no"}
+try:
+    ARCHIVE_AUDIO_MAINS_HZ = int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_MAINS_HZ", "60"))
+except ValueError:
+    ARCHIVE_AUDIO_MAINS_HZ = 60
+if ARCHIVE_AUDIO_MAINS_HZ not in {0, 50, 60}:
+    ARCHIVE_AUDIO_MAINS_HZ = 60
 RECONNECT_SECONDS = 2.0
 # A faster status heartbeat starts the public relay as soon as the laptop has
 # its first camera frame. Frame publishing itself remains continuous.
@@ -548,11 +565,34 @@ class SessionArchiver:
     def _ffconcat_path(path: Path) -> str:
         return "'" + str(path.resolve()).replace("'", r"'\''") + "'"
 
+    @staticmethod
+    def _master_recording_audio(source: Path, destination: Path) -> None:
+        """Create the final speech-first MP4 without touching the live path.
+
+        ``source`` is the just-concatenated temporary MP4.  The restoration
+        helper stream-copies its H.264 video, re-encodes only AAC audio, and
+        verifies the result before atomically producing ``destination``.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        ffprobe = shutil.which("ffprobe")
+        if ffmpeg is None or ffprobe is None:
+            raise RestorationError("ffmpeg and ffprobe are required for archive audio mastering")
+        restore_archive_audio(
+            source,
+            destination,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            available_filters=restoration_filters_available(ffmpeg),
+            mains_hz=ARCHIVE_AUDIO_MAINS_HZ,
+            overwrite=True,
+        )
+
     def _stitch_recording(self, metadata: dict[str, Any]) -> None:
         session_id = str(metadata["session_id"])
         session_dir = self.root / session_id
         output = self._recording_path(session_dir)
         temporary = output.with_name(f"{output.stem}.part{output.suffix}")
+        mastered_temporary = output.with_name(f"{output.stem}.mastered.part{output.suffix}")
         manifest = session_dir / ".recording.ffconcat"
         try:
             if output.exists() and output.stat().st_size > 0:
@@ -577,7 +617,20 @@ class SessionArchiver:
             if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
                 detail = completed.stderr.decode(errors="replace").strip()[-500:]
                 raise RuntimeError(detail or "ffmpeg did not create a stitched recording")
-            temporary.replace(output)
+            if not ARCHIVE_AUDIO_RESTORE_ENABLED:
+                temporary.replace(output)
+            else:
+                try:
+                    self._master_recording_audio(temporary, mastered_temporary)
+                    mastered_temporary.replace(output)
+                except RestorationError as exc:
+                    # Archive availability wins if an optional offline repair
+                    # dependency is unavailable. The original stitched copy
+                    # still has camera audio and can be restored later.
+                    with self.lock:
+                        self.errors.append(f"archive audio master {session_id}: {exc}"[-600:])
+                        del self.errors[:-10]
+                    temporary.replace(output)
         except Exception as exc:  # noqa: BLE001 - individual archive recovery must not stop live publishing
             with self.lock:
                 self.errors.append(f"archive recording {session_id}: {exc}"[-600:])
@@ -591,6 +644,7 @@ class SessionArchiver:
         finally:
             manifest.unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
+            mastered_temporary.unlink(missing_ok=True)
             with self.lock:
                 self.stitching.pop(session_id, None)
                 if output.exists() and output.stat().st_size > 0:

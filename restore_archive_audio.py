@@ -71,7 +71,6 @@ VIDEO_IDENTITY_FIELDS = (
     "width",
     "height",
     "pix_fmt",
-    "avg_frame_rate",
 )
 
 
@@ -236,6 +235,17 @@ def loudnorm_apply_filter(prefix: str, measured: dict[str, float]) -> str:
         f"TP={TRUE_PEAK_DB}:{values}:linear=true:dual_mono=true:print_format=summary,"
         f"alimiter=limit={LIMITER_PEAK}:level=0:attack=5:release=50:latency=1"
     )
+
+
+def quiet_input_filter(prefix: str) -> str:
+    """Keep an all-silent but otherwise valid recording playable.
+
+    FFmpeg reports ``-inf`` loudness for an entirely quiet camera interval,
+    which cannot be used as a two-pass R128 measurement.  It is not an audio
+    restoration failure: preserve the prepared AAC audio, avoid artificial
+    gain, and retain the same safety limiter.
+    """
+    return f"{prefix},alimiter=limit={LIMITER_PEAK}:level=0:attack=5:release=50:latency=1"
 
 
 def measure_command(ffmpeg: str, source: Path, filter_chain: str) -> list[str]:
@@ -483,8 +493,15 @@ def restore(
         measured_run = run_checked(
             measure_command(ffmpeg, source, plan.second_pass_prefix), timeout=900
         )
-        measured = parse_loudnorm_measurement(measured_run.stderr)
-        apply_filter = loudnorm_apply_filter(plan.second_pass_prefix, measured)
+        try:
+            measured = parse_loudnorm_measurement(measured_run.stderr)
+            apply_filter = loudnorm_apply_filter(plan.second_pass_prefix, measured)
+        except RestorationError as exc:
+            if not str(exc).startswith("non-finite loudness measurement"):
+                raise
+            # A silent interval has no usable LUFS target. Preserve it as
+            # silence rather than falling back to an unmastered 16 kHz file.
+            apply_filter = quiet_input_filter(plan.second_pass_prefix)
         run_checked(render_command(ffmpeg, source, temporary, apply_filter), timeout=1_800)
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise RestorationError("FFmpeg did not create an output recording")

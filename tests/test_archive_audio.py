@@ -37,6 +37,20 @@ class ArchiveAudioTests(unittest.TestCase):
             for stream in streams.get("streams", [])
         }
 
+    def _probe_audio(self, path: Path) -> dict[str, str]:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        streams = json.loads(probe.stdout).get("streams", [])
+        self.assertEqual(len(streams), 1)
+        return streams[0]
+
     def test_part_preview_and_stitched_recording_contain_aac_audio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             session_dir = Path(temporary) / "Curtis-audio-contract-0001"
@@ -84,6 +98,12 @@ class ArchiveAudioTests(unittest.TestCase):
             recording = session_dir / "recording.mp4"
             self.assertTrue(recording.exists())
             self.assertIn(("audio", "aac"), self._probe_streams(recording))
+            # The final MP4, unlike a relay-safe preview, is mastered after
+            # stitching: it preserves copied video and uses 48 kHz AAC audio.
+            mastered_audio = self._probe_audio(recording)
+            self.assertEqual(mastered_audio["codec_name"], "aac")
+            self.assertEqual(mastered_audio["sample_rate"], "48000", archiver.errors)
+            self.assertEqual(mastered_audio["channels"], 1)
 
     def test_live_pcm_is_written_with_the_active_part_before_encoding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

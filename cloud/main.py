@@ -1290,7 +1290,10 @@ async def archive_recording(session_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404, detail="stitched archive recording is not ready")
     data = recording["data"]
     total = len(data)
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=31536000, immutable"}
+    # A recording can be upgraded from playable parts to a stitched/mastered
+    # final MP4 under the same stable archive URL. Do not let a browser retain
+    # an older byte range indefinitely after that atomic replacement.
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
     match = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("range", ""))
     if match:
         try:
