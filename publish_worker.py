@@ -317,9 +317,11 @@ def transcript_high_watermark(payload: dict[str, Any] | None) -> int:
     return max(values, default=-1)
 
 
-async def sync_archive_index(archiver: SessionArchiver, send: Any) -> None:
+async def sync_archive_index(archiver: SessionArchiver, send: Any, exclude_session_id: str | None = None) -> None:
     """Tell a newly connected relay about retained sessions and their text."""
     for metadata in archiver.manifests():
+        if metadata.get("session_id") == exclude_session_id:
+            continue
         await send({"type": "archive_session", "session": metadata})
         for line in archiver.transcript_lines(str(metadata["session_id"])):
             await send({"type": "archive_transcript", "session_id": metadata["session_id"], "line": line})
@@ -350,8 +352,18 @@ async def upload_next_segment(archiver: SessionArchiver, send: Any) -> None:
 
 async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asyncio.Event, archiver: SessionArchiver) -> None:
     transcript_id = -1
+    resumed_session = archiver.session()
     announced_session_id: str | None = None
-    await sync_archive_index(archiver, send)
+    needs_transcript_watermark = False
+    if resumed_session is not None:
+        # Restore this recording as the live session first. Its saved lines are
+        # replayed as live events, while all completed sessions stay archive-only.
+        await send({"type": "session_start", "session": resumed_session})
+        announced_session_id = str(resumed_session["session_id"])
+        for line in archiver.transcript_lines(announced_session_id):
+            await send({"type": "transcript", "line": line})
+        needs_transcript_watermark = True
+    await sync_archive_index(archiver, send, exclude_session_id=announced_session_id)
     while not stop.is_set():
         stream = await get_json(session, "/api/stream")
         fresh_at = stream.get("last_live_frame_at") if stream else None
@@ -362,6 +374,9 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
         source = stream.get("source") if stream else None
         transcript = await get_json(session, "/api/transcript")
         active = archiver.session()
+        if live and active is not None and needs_transcript_watermark:
+            transcript_id = transcript_high_watermark(transcript)
+            needs_transcript_watermark = False
         if live and active is None:
             active = archiver.start(WORKER, str(source) if source else None)
             # The local transcriber retains recent lines.  Set the watermark at
