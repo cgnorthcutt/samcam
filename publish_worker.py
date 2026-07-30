@@ -34,10 +34,21 @@ LOCAL_URL = os.environ.get("SAMCAM_LOCAL_URL", "http://127.0.0.1:8011").rstrip("
 RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam-relay.onrender.com").rstrip("/")
 WORKER = os.environ.get("SAMCAM_WORKER", "Curtis").strip() or "Curtis"
 ARCHIVE_ROOT = Path(os.environ.get("SAMCAM_ARCHIVE_DIR", str(HERE / "archives"))).expanduser()
-ARCHIVE_SEGMENT_SECONDS = max(5.0, float(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_SECONDS", "10")))
+# Parts are a recovery/preview format.  Five minutes keeps the archive usable
+# without turning every short session into dozens of tiny videos.  Operators
+# can still request shorter parts when a relay or network needs them.
+ARCHIVE_SEGMENT_SECONDS = max(5.0, float(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_SECONDS", "300")))
 ARCHIVE_FPS = max(1, int(os.environ.get("SAMCAM_ARCHIVE_FPS", "30")))
-MAX_ARCHIVE_SEGMENT_BYTES = 8_000_000
+MAX_ARCHIVE_SEGMENT_BYTES = max(500_000, int(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_MAX_BYTES", "8000000")))
+# Keep each preview part below the relay's single-WebSocket-message limit.  A
+# five minute part needs a much lower bitrate than a ten second part, while
+# the browser's live MJPEG feed remains entirely unaffected.
+ARCHIVE_VIDEO_MAX_KBPS = max(64, int(os.environ.get("SAMCAM_ARCHIVE_VIDEO_MAX_KBPS", "1100")))
+ARCHIVE_SEGMENT_SIZE_HEADROOM = 0.80
 ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
+ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
+    1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
+)
 RECONNECT_SECONDS = 2.0
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
@@ -61,6 +72,20 @@ class LocalRecordingChunk:
     index: int
     count: int
     size_bytes: int
+
+
+def archive_part_bitrate_kbps(duration_seconds: float) -> int:
+    """Choose a bounded archive bitrate that keeps one part relay-safe.
+
+    The public relay deliberately caps a binary archive part below its WebSocket
+    message limit.  Without this bound, simply changing a part from ten seconds
+    to five minutes silently creates 40 MB files that are never uploaded.
+    """
+    seconds = max(1.0, duration_seconds)
+    relay_limit_kbps = int(
+        MAX_ARCHIVE_SEGMENT_BYTES * 8 * ARCHIVE_SEGMENT_SIZE_HEADROOM / seconds / 1_000
+    )
+    return max(64, min(ARCHIVE_VIDEO_MAX_KBPS, relay_limit_kbps))
 
 
 def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -179,7 +204,10 @@ class SessionArchiver:
         self.active_segment_started_at: float | None = None
         self.active_segment_frames = 0
         self.encoding: dict[str, set[threading.Thread]] = {}
+        self.encoding_parts: set[tuple[str, int]] = set()
         self.stitching: dict[str, threading.Thread] = {}
+        self.stitch_failures: dict[str, int] = {}
+        self.stitch_retry_after: dict[str, float] = {}
         self.analyzing: dict[str, threading.Thread] = {}
         self.uploaded: set[tuple[str, int]] = set()
         self.uploaded_recording_chunks: set[tuple[str, int]] = set()
@@ -223,7 +251,7 @@ class SessionArchiver:
 
     def _encode_segment(self, raw_path: Path, segment: LocalSegment) -> None:
         output = segment.path
-        sidecar = output.with_suffix(".json")
+        temporary = output.with_name(f"{output.stem}.part{output.suffix}")
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             with self.lock:
@@ -239,35 +267,40 @@ class SessionArchiver:
             frame_rate = ARCHIVE_FPS
             if segment.frame_count:
                 frame_rate = max(1.0, min(60.0, segment.frame_count / max(0.1, segment.duration_seconds)))
+            bitrate_kbps = archive_part_bitrate_kbps(segment.duration_seconds)
+            temporary.unlink(missing_ok=True)
             completed = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-f", "image2pipe", "-framerate", f"{frame_rate:.3f}", "-c:v", "mjpeg", "-i", str(raw_path),
                     "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                    "-crf", "28", "-maxrate", "1100k", "-bufsize", "1800k", "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart", str(output),
+                    "-b:v", f"{bitrate_kbps}k", "-maxrate", f"{bitrate_kbps}k",
+                    "-bufsize", f"{bitrate_kbps * 2}k", "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart", str(temporary),
                 ],
                 capture_output=True,
                 timeout=180,
             )
-            if completed.returncode != 0 or not output.exists() or output.stat().st_size == 0:
+            if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
                 detail = completed.stderr.decode(errors="replace").strip()[-500:]
                 raise RuntimeError(detail or "ffmpeg produced no MP4")
-            sidecar.write_text(json.dumps({
-                "session_id": segment.session_id,
-                "sequence": segment.sequence,
-                "started_at": segment.started_at,
-                "duration_seconds": segment.duration_seconds,
-                "frame_count": segment.frame_count,
-            }, separators=(",", ":")))
+            if temporary.stat().st_size > MAX_ARCHIVE_SEGMENT_BYTES:
+                raise RuntimeError(
+                    f"encoded archive part is {temporary.stat().st_size:,} bytes; "
+                    f"relay limit is {MAX_ARCHIVE_SEGMENT_BYTES:,}"
+                )
+            temporary.replace(output)
             raw_path.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 - live publishing must never stop for archive encoding
             with self.lock:
                 self.errors.append(f"archive segment {segment.sequence}: {exc}"[-600:])
                 del self.errors[:-10]
+        finally:
+            temporary.unlink(missing_ok=True)
 
-    def _finish_encoding(self, session_id: str, thread: threading.Thread) -> None:
+    def _finish_encoding(self, session_id: str, sequence: int, thread: threading.Thread) -> None:
         with self.lock:
+            self.encoding_parts.discard((session_id, sequence))
             pending = self.encoding.get(session_id)
             if pending is None:
                 return
@@ -299,15 +332,85 @@ class SessionArchiver:
             frame_count=frames,
         )
 
+        sidecar = segment.path.with_suffix(".json")
+        sidecar.write_text(json.dumps({
+            "session_id": segment.session_id,
+            "sequence": segment.sequence,
+            "started_at": segment.started_at,
+            "duration_seconds": segment.duration_seconds,
+            "frame_count": segment.frame_count,
+        }, separators=(",", ":")))
+        self._queue_segment_encoding_locked(raw_path, segment)
+
+    def _queue_segment_encoding_locked(self, raw_path: Path, segment: LocalSegment) -> None:
+        key = (segment.session_id, segment.sequence)
+        if key in self.encoding_parts:
+            return
+        if not raw_path.exists() or raw_path.stat().st_size <= 0:
+            return
+        # A previous worker version encoded directly to the final name.  If it
+        # was interrupted it can leave a non-empty but invalid MP4 behind;
+        # prefer the retained MJPEG source and rebuild atomically.
+        segment.path.unlink(missing_ok=True)
+
         def encode() -> None:
             try:
                 self._encode_segment(raw_path, segment)
             finally:
-                self._finish_encoding(segment.session_id, threading.current_thread())
+                self._finish_encoding(segment.session_id, segment.sequence, threading.current_thread())
 
-        thread = threading.Thread(target=encode, daemon=True, name=f"samcam-archive-{sequence}")
+        thread = threading.Thread(target=encode, daemon=True, name=f"samcam-archive-{segment.sequence}")
+        self.encoding_parts.add(key)
         self.encoding.setdefault(segment.session_id, set()).add(thread)
         thread.start()
+
+    def _recover_session_segments_locked(self, metadata: dict[str, Any]) -> None:
+        """Resume raw parts left behind by an interrupted or failed encoder.
+
+        Segment details are written *before* ffmpeg starts, so a worker restart
+        has enough information to recreate the exact MP4.  Old sessions that
+        predate that sidecar convention still get a safe best-effort recovery.
+        """
+        session_id = str(metadata["session_id"])
+        session_dir = self.root / session_id
+        for raw_path in sorted(session_dir.glob("segment-*.mjpeg")):
+            try:
+                sequence = int(raw_path.stem.rsplit("-", 1)[1])
+                sidecar = raw_path.with_suffix(".json")
+                details = json.loads(sidecar.read_text())
+                segment = LocalSegment(
+                    session_id=session_id,
+                    sequence=sequence,
+                    started_at=float(details["started_at"]),
+                    duration_seconds=max(0.1, float(details["duration_seconds"])),
+                    path=raw_path.with_suffix(".mp4"),
+                    frame_count=max(0, int(details.get("frame_count") or 0)),
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                try:
+                    sequence = int(raw_path.stem.rsplit("-", 1)[1])
+                    ended_at = raw_path.stat().st_mtime
+                except (OSError, ValueError):
+                    continue
+                started_at = float(metadata.get("started_at") or ended_at)
+                segment = LocalSegment(
+                    session_id=session_id,
+                    sequence=sequence,
+                    started_at=started_at,
+                    duration_seconds=max(0.1, min(ARCHIVE_SEGMENT_SECONDS, ended_at - started_at)),
+                    path=raw_path.with_suffix(".mp4"),
+                )
+                try:
+                    segment.path.with_suffix(".json").write_text(json.dumps({
+                        "session_id": segment.session_id,
+                        "sequence": segment.sequence,
+                        "started_at": segment.started_at,
+                        "duration_seconds": segment.duration_seconds,
+                        "frame_count": segment.frame_count,
+                    }, separators=(",", ":")))
+                except OSError:
+                    continue
+            self._queue_segment_encoding_locked(raw_path, segment)
 
     def _wait_for_session_encoding(self, session_id: str, timeout: float = 300.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -335,11 +438,13 @@ class SessionArchiver:
         try:
             if output.exists() and output.stat().st_size > 0:
                 return
+            with self.lock:
+                self._recover_session_segments_locked(metadata)
             if not self._wait_for_session_encoding(session_id):
                 raise RuntimeError("timed out waiting for archive parts to encode")
             parts = sorted(session_dir.glob("segment-*.mp4"))
             if not parts:
-                return
+                raise RuntimeError("no encoded archive parts are available to stitch")
             manifest.write_text("".join(f"file {self._ffconcat_path(path)}\n" for path in parts))
             ffmpeg = shutil.which("ffmpeg")
             if ffmpeg is None:
@@ -358,19 +463,30 @@ class SessionArchiver:
             with self.lock:
                 self.errors.append(f"archive recording {session_id}: {exc}"[-600:])
                 del self.errors[:-10]
+                failures = self.stitch_failures.get(session_id, 0) + 1
+                self.stitch_failures[session_id] = failures
+                # Keep retrying failed/concurrently interrupted sessions, but
+                # do not spin ffmpeg every status tick if a disk is full or a
+                # local dependency is temporarily unavailable.
+                self.stitch_retry_after[session_id] = time.monotonic() + min(30.0, 2.0 ** min(failures, 5))
         finally:
             manifest.unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
             with self.lock:
                 self.stitching.pop(session_id, None)
                 if output.exists() and output.stat().st_size > 0:
+                    self.stitch_failures.pop(session_id, None)
+                    self.stitch_retry_after.pop(session_id, None)
                     self._schedule_analysis_locked(metadata)
 
     def _schedule_stitch_locked(self, metadata: dict[str, Any]) -> None:
         session_id = str(metadata["session_id"])
         session_dir = self.root / session_id
         output = self._recording_path(session_dir)
+        self._recover_session_segments_locked(metadata)
         if session_id in self.stitching or (output.exists() and output.stat().st_size > 0):
+            return
+        if time.monotonic() < self.stitch_retry_after.get(session_id, 0.0):
             return
         thread = threading.Thread(
             target=self._stitch_recording,
@@ -796,6 +912,11 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
     archiver.schedule_completed_recordings()
     await sync_archive_index(archiver, send, exclude_session_id=announced_session_id)
     while not stop.is_set():
+        # This is intentionally cheap when everything is healthy.  It makes a
+        # finished session self-healing after a failed ffmpeg process, a laptop
+        # sleep, or a publisher restart instead of leaving it "stitching"
+        # until the next manual restart.
+        archiver.schedule_completed_recordings()
         stream = await get_json(session, "/api/stream")
         fresh_at = stream.get("last_live_frame_at") if stream else None
         try:
@@ -848,14 +969,16 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
                     )
                     archiver.append_transcript(event)
                     await send({"type": "transcript", "line": event})
-        segment_uploaded = await upload_next_segment(archiver, send)
-        # Short MP4 parts are retained for reliable ingest, while completed
-        # sessions are also uploaded as one stitched MP4 for normal playback.
-        # Give a currently recording session's next part priority first.
-        if not segment_uploaded:
-            await upload_next_recording_chunk(archiver, send)
-            await publish_completed_recording(archiver, send)
-            await publish_next_analytics(archiver, send)
+        # Completed recordings must not sit behind a long history of preview
+        # parts.  Upload a small bounded batch every tick, then still send one
+        # part so Archive can show recoverable previews while the full MP4 is
+        # being assembled/uploaded.
+        for _ in range(ARCHIVE_RECORDING_CHUNKS_PER_TICK):
+            if not await upload_next_recording_chunk(archiver, send):
+                break
+        await publish_completed_recording(archiver, send)
+        await publish_next_analytics(archiver, send)
+        await upload_next_segment(archiver, send)
         try:
             await asyncio.wait_for(stop.wait(), timeout=1.0)
         except asyncio.TimeoutError:
