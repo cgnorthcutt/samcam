@@ -23,6 +23,7 @@ SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
 CHUNK_BYTES = int(CHUNK_SECONDS * SAMPLE_RATE * BYTES_PER_SAMPLE)
 MIN_RMS_DB = float(os.environ.get("BODYCAM_TRANSCRIPT_MIN_RMS_DB", "-52"))
+MIN_AVG_LOGPROB = float(os.environ.get("BODYCAM_TRANSCRIPT_MIN_AVG_LOGPROB", "-1.0"))
 QUEUED_CHUNKS = int(os.environ.get("BODYCAM_TRANSCRIPT_QUEUED_CHUNKS", "6"))
 COMMON_SILENCE_HALLUCINATIONS = {
     "thank you",
@@ -143,15 +144,29 @@ def main() -> None:
         )
         known_silence_hallucination = (
             normalized in COMMON_SILENCE_HALLUCINATIONS
-            and (average_logprob is None or average_logprob < -0.30)
+            and (
+                rms_db < -30.0
+                or average_logprob is None
+                or average_logprob < -0.30
+            )
+        )
+        low_confidence = (
+            average_logprob is not None
+            and average_logprob < MIN_AVG_LOGPROB
         )
         repeated_hallucination = (
             bool(normalized)
             and normalized == last_emitted_text
             and (average_logprob is None or average_logprob < -0.35)
         )
+        has_spoken_characters = any(character.isalnum() for character in text)
 
-        if text and not known_silence_hallucination and not repeated_hallucination:
+        if (
+            has_spoken_characters
+            and not low_confidence
+            and not known_silence_hallucination
+            and not repeated_hallucination
+        ):
             last_emitted_text = normalized
             emit(
                 {
@@ -177,11 +192,13 @@ def main() -> None:
                     "ended": audio_time,
                     "rms_db": round(rms_db, 1),
                     "reason": (
-                        "known_hallucination"
+                        "low_confidence"
+                        if low_confidence
+                        else "known_hallucination"
                         if known_silence_hallucination
                         else "repeated_hallucination"
                         if repeated_hallucination
-                        else "no_text"
+                        else "no_spoken_characters"
                     ),
                 }
             )
