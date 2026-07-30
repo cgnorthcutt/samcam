@@ -178,6 +178,16 @@ Build command: pip install -r requirements-relay.txt
 Start command: uvicorn cloud.main:app --host 0.0.0.0 --port $PORT
 ```
 
+The archive requires a Render Postgres instance. In the Sam Cam service's
+**Environment** settings, set `DATABASE_URL` to the Postgres service's
+**Internal Database URL** (the service and database must be in the same Render
+region). Do not paste a hostname by hand. On boot, `/healthz` must report
+`{"status":"ok","archive":"ready"}`. `archive:"reconnecting"` means the
+relay is keeping live video available while it retries Postgres, but it will
+intentionally return 503 for Archive rather than pretending the durable
+archive is empty. The relay replays any session data received during a brief
+database outage once the connection returns.
+
 Use the Render service's generated `*.onrender.com` URL as `SAMCAM_RELAY_URL`
 until the custom domain is active. Then add `samcam.app` in Render's Custom
 Domains screen. For Namecheap, Render's documented root-domain setup is an

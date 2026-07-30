@@ -15,7 +15,7 @@ import os
 import re
 import time
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -43,6 +43,18 @@ ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
 LIVE_AUDIO_MAGIC = b"SCAU"
 LIVE_AUDIO_HISTORY_PACKETS = 80
+ARCHIVE_DATABASE_RETRY_SECONDS = max(
+    1.0, float(os.environ.get("SAMCAM_ARCHIVE_DATABASE_RETRY_SECONDS", "5"))
+)
+
+
+class ArchiveUnavailable(RuntimeError):
+    """The durable archive could not answer this request right now.
+
+    Returning an empty list for a failed Postgres read makes the browser think
+    that a real archive was deleted.  Keep this distinct from a genuinely
+    empty archive so callers can preserve their last known-good state.
+    """
 
 
 def require_worker_name(raw_name: str) -> tuple[str, str]:
@@ -75,11 +87,16 @@ def session_duration(session: dict[str, Any]) -> float:
 
 
 class ArchiveStore:
-    """Postgres-backed archive with an in-memory fallback for local development."""
+    """Postgres-backed archive with an explicit local-development fallback."""
 
     def __init__(self) -> None:
         self.pool: Any | None = None
         self.error: str | None = None
+        self.database_url = os.environ.get("DATABASE_URL", "").strip()
+        # No DATABASE_URL is a deliberate local-development configuration. A
+        # configured-but-unreachable database is *not* an acceptable fallback
+        # for public archive reads: it would make durable sessions disappear.
+        self.database_required = bool(self.database_url)
         self.memory_sessions: dict[str, dict[str, Any]] = {}
         self.memory_segments: dict[tuple[str, int], dict[str, Any]] = {}
         self.memory_recording_chunks: dict[tuple[str, int], dict[str, Any]] = {}
@@ -88,16 +105,20 @@ class ArchiveStore:
         self.memory_analytics: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
+        if not self.database_required:
             self.error = "archive database is not configured"
             return
         if asyncpg is None:
             self.error = "asyncpg is not installed"
             return
+        if self.pool is not None:
+            return
+        candidate: Any | None = None
         try:
-            self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=3, command_timeout=30)
-            async with self.pool.acquire() as connection:
+            candidate = await asyncpg.create_pool(
+                self.database_url, min_size=1, max_size=3, command_timeout=30
+            )
+            async with candidate.acquire() as connection:
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS samcam_archive_sessions (
@@ -152,15 +173,79 @@ class ArchiveStore:
                         ON samcam_archive_transcripts (session_id, started_at);
                     """
                 )
+            self.pool = candidate
             self.error = None
+            # A boot-time database DNS miss must not discard what the active
+            # publisher already delivered to this process. Replay its bounded
+            # in-memory copy as soon as durable storage comes back.
+            await self._flush_memory_to_database()
         except Exception as exc:  # noqa: BLE001 - the live relay must survive an archive outage
+            if candidate is not None:
+                await candidate.close()
             self.pool = None
             self.error = f"archive database unavailable: {exc}"[-300:]
             print(self.error, flush=True)
 
+    async def _flush_memory_to_database(self) -> None:
+        """Persist data accepted while a configured database was reconnecting."""
+        if self.pool is None:
+            return
+        sessions = [dict(record) for record in self.memory_sessions.values()]
+        segments = [dict(record) for record in self.memory_segments.values()]
+        recording_chunks = [dict(record) for record in self.memory_recording_chunks.values()]
+        recordings = [dict(record) for record in self.memory_recordings.values()]
+        transcripts = list(self.memory_transcripts.values())
+        analytics = dict(self.memory_analytics)
+
+        for record in sessions:
+            await self.start_session(record, str(record["worker_name"]))
+        for record in segments:
+            await self.save_segment(record, bytes(record["data"]))
+        for record in recording_chunks:
+            await self.save_recording_chunk(
+                {
+                    "session_id": record["session_id"],
+                    "index": record["index"],
+                    "count": record["count"],
+                    "size_bytes": record["total_size"],
+                },
+                bytes(record["data"]),
+            )
+        for record in recordings:
+            await self.complete_recording(
+                str(record["session_id"]),
+                int(record["chunk_count"]),
+                int(record["size_bytes"]),
+            )
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for record in transcripts:
+            by_session.setdefault(str(record["session_id"]), []).append(dict(record))
+        for session_id, lines in by_session.items():
+            await self.replace_transcript(session_id, lines)
+        for session_id, payload in analytics.items():
+            await self.save_analytics(session_id, payload)
+
+    async def reconnect_forever(self) -> None:
+        """Reconnect a configured Postgres archive without interrupting live relay."""
+        while self.database_required:
+            if self.pool is None:
+                await self.start()
+            await asyncio.sleep(ARCHIVE_DATABASE_RETRY_SECONDS)
+
+    async def _mark_database_unavailable(self, message: str) -> None:
+        """Drop a failed pool so the reconnect loop can replace it cleanly."""
+        self.error = message[-300:]
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception:  # noqa: BLE001 - original read error is clearer
+                pass
+
     async def close(self) -> None:
-        if self.pool is not None:
-            await self.pool.close()
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            await pool.close()
 
     async def start_session(self, session: dict[str, Any], worker_name: str) -> None:
         session_id = require_session_id(session.get("session_id"))
@@ -193,8 +278,9 @@ class ArchiveStore:
                     record["session_id"], record["worker_name"], record["source"], record["started_at"], record["ended_at"],
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive write failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive write failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def end_session(self, session_id: str, ended_at: float | None = None) -> None:
         session_id = require_session_id(session_id)
@@ -210,8 +296,9 @@ class ArchiveStore:
                     session_id, ended_at,
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive update failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive update failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def save_segment(self, metadata: dict[str, Any], data: bytes) -> None:
         session_id = require_session_id(metadata.get("session_id"))
@@ -243,8 +330,9 @@ class ArchiveStore:
                     record["content_type"], record["data"], record["size_bytes"],
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive segment failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive segment failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def save_recording_chunk(self, metadata: dict[str, Any], data: bytes) -> None:
         """Save one byte range of a finished, stitched MP4 recording."""
@@ -281,8 +369,9 @@ class ArchiveStore:
                     session_id, index, data, len(data),
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive recording chunk failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive recording chunk failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def complete_recording(self, session_id: str, chunk_count: int, size_bytes: int) -> None:
         session_id = require_session_id(session_id)
@@ -326,8 +415,9 @@ class ArchiveStore:
                         session_id, chunk_count, size_bytes,
                     )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive recording completion failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive recording completion failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def save_analytics(self, session_id: str, payload: dict[str, Any]) -> None:
         """Store video-derived per-session analytics sent by the local publisher."""
@@ -358,12 +448,17 @@ class ArchiveStore:
                     session_id, serialized,
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive analytics write failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive analytics write failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def analytics(self, session_id: str) -> dict[str, Any] | None:
         session_id = require_session_id(session_id)
         if self.pool is None:
+            if self.database_required:
+                raise ArchiveUnavailable(
+                    self.error or "archive database is reconnecting"
+                )
             return self.memory_analytics.get(session_id)
         try:
             async with self.pool.acquire() as connection:
@@ -384,9 +479,10 @@ class ArchiveStore:
                     return None
             return dict(payload) if isinstance(payload, dict) else None
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive analytics read failed: {exc}"[-300:]
-            print(self.error, flush=True)
-            return None
+            message = f"archive analytics read failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
+            raise ArchiveUnavailable(message) from exc
 
     async def delete_session(self, session_id: str) -> None:
         """Permanently remove one archived session and all of its artifacts."""
@@ -415,6 +511,10 @@ class ArchiveStore:
     async def recording(self, session_id: str) -> dict[str, Any] | None:
         session_id = require_session_id(session_id)
         if self.pool is None:
+            if self.database_required:
+                raise ArchiveUnavailable(
+                    self.error or "archive database is reconnecting"
+                )
             metadata = self.memory_recordings.get(session_id)
             if metadata is None:
                 return None
@@ -446,9 +546,10 @@ class ArchiveStore:
                 return None
             return {**dict(metadata), "data": data}
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive recording read failed: {exc}"[-300:]
-            print(self.error, flush=True)
-            return None
+            message = f"archive recording read failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
+            raise ArchiveUnavailable(message) from exc
 
     async def save_transcript(self, session_id: str, line: dict[str, Any]) -> None:
         session_id = require_session_id(session_id)
@@ -479,8 +580,9 @@ class ArchiveStore:
                     record["session_id"], record["line_key"], record["started_at"], record["received_at"], record["text"],
                 )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive transcript failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive transcript failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     async def replace_transcript(self, session_id: str, lines: list[dict[str, Any]]) -> None:
         """Synchronize one archived session from the publisher's local source of truth."""
@@ -532,8 +634,9 @@ class ArchiveStore:
                             ],
                         )
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive transcript sync failed: {exc}"[-300:]
-            print(self.error, flush=True)
+            message = f"archive transcript sync failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
 
     def _memory_summary(self, record: dict[str, Any]) -> dict[str, Any]:
         session_id = record["session_id"]
@@ -553,6 +656,10 @@ class ArchiveStore:
 
     async def list_sessions(self, worker_name: str) -> list[dict[str, Any]]:
         if self.pool is None:
+            if self.database_required:
+                raise ArchiveUnavailable(
+                    self.error or "archive database is reconnecting"
+                )
             return sorted(
                 [
                     self._memory_summary(record)
@@ -593,13 +700,18 @@ class ArchiveStore:
                 record["duration_seconds"] = session_duration(record)
             return sessions
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive read failed: {exc}"[-300:]
-            print(self.error, flush=True)
-            return []
+            message = f"archive read failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
+            raise ArchiveUnavailable(message) from exc
 
     async def session_detail(self, session_id: str) -> dict[str, Any] | None:
         session_id = require_session_id(session_id)
         if self.pool is None:
+            if self.database_required:
+                raise ArchiveUnavailable(
+                    self.error or "archive database is reconnecting"
+                )
             session = self.memory_sessions.get(session_id)
             if session is None:
                 return None
@@ -644,15 +756,20 @@ class ArchiveStore:
             result["duration_seconds"] = session_duration(result)
             return result
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive detail failed: {exc}"[-300:]
-            print(self.error, flush=True)
-            return None
+            message = f"archive detail failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
+            raise ArchiveUnavailable(message) from exc
 
     async def segment(self, session_id: str, sequence: int) -> dict[str, Any] | None:
         session_id = require_session_id(session_id)
         if sequence < 0:
             return None
         if self.pool is None:
+            if self.database_required:
+                raise ArchiveUnavailable(
+                    self.error or "archive database is reconnecting"
+                )
             return self.memory_segments.get((session_id, sequence))
         try:
             async with self.pool.acquire() as connection:
@@ -662,9 +779,10 @@ class ArchiveStore:
                 )
             return dict(row) if row is not None else None
         except Exception as exc:  # noqa: BLE001
-            self.error = f"archive segment read failed: {exc}"[-300:]
-            print(self.error, flush=True)
-            return None
+            message = f"archive segment read failed: {exc}"[-300:]
+            print(message, flush=True)
+            await self._mark_database_unavailable(message)
+            raise ArchiveUnavailable(message) from exc
 
 
 @dataclass
@@ -706,8 +824,19 @@ workers_lock = asyncio.Lock()
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await archive.start()
-    yield
-    await archive.close()
+    reconnect_task = (
+        asyncio.create_task(archive.reconnect_forever())
+        if archive.database_required
+        else None
+    )
+    try:
+        yield
+    finally:
+        if reconnect_task is not None:
+            reconnect_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconnect_task
+        await archive.close()
 
 
 app = FastAPI(title="Sam Cam Relay", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -908,7 +1037,13 @@ async def home() -> FileResponse:
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
-    return {"status": "ok", "archive": "ready" if archive.pool is not None else "local-fallback"}
+    if archive.pool is not None:
+        return {"status": "ok", "archive": "ready"}
+    if archive.database_required:
+        # Keep the web process live so it can retry DNS/database recovery; the
+        # archive endpoints themselves return 503 rather than false emptiness.
+        return {"status": "degraded", "archive": "reconnecting"}
+    return {"status": "ok", "archive": "local-development-fallback"}
 
 
 @app.get("/api/workers")
@@ -953,7 +1088,18 @@ async def worker_archives(worker_name: str) -> JSONResponse:
         _, friendly_name = require_worker_name(worker_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse({"worker": friendly_name, "sessions": await archive.list_sessions(friendly_name)}, headers={"Cache-Control": "no-store"})
+    try:
+        sessions = await archive.list_sessions(friendly_name)
+    except ArchiveUnavailable as exc:
+        # The public client keeps its previous list and retries.  A 503 is
+        # deliberate: an empty array would incorrectly look like an archive
+        # deletion during a transient database or Render connection failure.
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
+    return JSONResponse({"worker": friendly_name, "sessions": sessions}, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/worker/{worker_name}/analytics")
@@ -962,7 +1108,14 @@ async def worker_analytics(worker_name: str) -> JSONResponse:
         _, friendly_name = require_worker_name(worker_name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    sessions = await archive.list_sessions(friendly_name)
+    try:
+        sessions = await archive.list_sessions(friendly_name)
+    except ArchiveUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     total_seconds = sum(float(item["duration_seconds"]) for item in sessions)
     total_bytes = sum(int(item["size_bytes"]) for item in sessions)
     transcript_lines = sum(int(item["transcript_count"]) for item in sessions)
@@ -998,6 +1151,12 @@ async def worker_analytics(worker_name: str) -> JSONResponse:
 async def archive_detail(session_id: str) -> JSONResponse:
     try:
         detail = await archive.session_detail(session_id)
+    except ArchiveUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if detail is None:
@@ -1009,6 +1168,12 @@ async def archive_detail(session_id: str) -> JSONResponse:
 async def archive_analytics(session_id: str) -> JSONResponse:
     try:
         payload = await archive.analytics(session_id)
+    except ArchiveUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload is None:
@@ -1020,6 +1185,12 @@ async def archive_analytics(session_id: str) -> JSONResponse:
 async def archive_segment(session_id: str, sequence: int) -> Response:
     try:
         segment = await archive.segment(session_id, sequence)
+    except ArchiveUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if segment is None:
@@ -1031,6 +1202,12 @@ async def archive_segment(session_id: str, sequence: int) -> Response:
 async def archive_recording(session_id: str, request: Request) -> Response:
     try:
         recording = await archive.recording(session_id)
+    except ArchiveUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="archive is temporarily unavailable; retry shortly",
+            headers={"Retry-After": "3"},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if recording is None:

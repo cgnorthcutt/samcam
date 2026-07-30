@@ -45,6 +45,13 @@ MAX_ARCHIVE_SEGMENT_BYTES = max(500_000, int(os.environ.get("SAMCAM_ARCHIVE_SEGM
 # the browser's live MJPEG feed remains entirely unaffected.
 ARCHIVE_VIDEO_MAX_KBPS = max(64, int(os.environ.get("SAMCAM_ARCHIVE_VIDEO_MAX_KBPS", "1100")))
 ARCHIVE_SEGMENT_SIZE_HEADROOM = 0.80
+ARCHIVE_AUDIO_RATE = 16_000
+ARCHIVE_AUDIO_CHANNELS = 1
+ARCHIVE_AUDIO_BYTES_PER_SECOND = ARCHIVE_AUDIO_RATE * ARCHIVE_AUDIO_CHANNELS * 2
+# AAC-LC at this rate is supported by Chrome/Safari and comfortably preserves
+# speech while keeping five-minute preview parts below the relay message cap.
+ARCHIVE_AUDIO_KBPS = max(24, int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_KBPS", "48")))
+ARCHIVE_PREVIEW_AUDIO_KBPS = max(16, min(ARCHIVE_AUDIO_KBPS, 32))
 ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
     1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
@@ -93,7 +100,10 @@ def archive_preview_bitrate_kbps(duration_seconds: float) -> int:
     relay_limit_kbps = int(
         MAX_ARCHIVE_SEGMENT_BYTES * 8 * ARCHIVE_SEGMENT_SIZE_HEADROOM / seconds / 1_000
     )
-    return max(64, min(ARCHIVE_VIDEO_MAX_KBPS, relay_limit_kbps))
+    # Reserve a small, fixed audio budget before constraining video.  The
+    # public preview must retain sound as well as fit in one relay message.
+    video_budget_kbps = max(64, relay_limit_kbps - ARCHIVE_PREVIEW_AUDIO_KBPS)
+    return max(64, min(ARCHIVE_VIDEO_MAX_KBPS, video_budget_kbps))
 
 
 def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -208,9 +218,11 @@ class SessionArchiver:
         self.active: dict[str, Any] | None = None
         self.active_dir: Path | None = None
         self.active_raw: Any | None = None
+        self.active_audio: Any | None = None
         self.active_sequence = 0
         self.active_segment_started_at: float | None = None
         self.active_segment_frames = 0
+        self.active_segment_audio_bytes = 0
         self.encoding: dict[str, set[threading.Thread]] = {}
         self.encoding_parts: set[tuple[str, int]] = set()
         self.stitching: dict[str, threading.Thread] = {}
@@ -244,6 +256,11 @@ class SessionArchiver:
         return segment_path.parent / ".previews" / segment_path.name
 
     @staticmethod
+    def _audio_path(raw_path: Path) -> Path:
+        """Sidecar raw PCM for one JPEG segment (16 kHz mono s16le)."""
+        return raw_path.with_suffix(".s16le")
+
+    @staticmethod
     def _analytics_path(session_dir: Path) -> Path:
         return session_dir / "analytics.json"
 
@@ -257,13 +274,49 @@ class SessionArchiver:
         if self.active is None or self.active_dir is None:
             return
         raw_path = self.active_dir / f"segment-{self.active_sequence:05d}.mjpeg"
+        audio_path = self._audio_path(raw_path)
         self.active_raw = raw_path.open("wb")
+        self.active_audio = audio_path.open("wb")
         self.active_segment_started_at = started_at
         self.active_segment_frames = 0
+        self.active_segment_audio_bytes = 0
+
+    @staticmethod
+    def _write_silence(handle: Any, byte_count: int) -> None:
+        """Write PCM silence without allocating a potentially huge buffer."""
+        remaining = max(0, byte_count - (byte_count % 2))
+        silence = b"\0" * min(64 * 1024, remaining)
+        while remaining:
+            chunk = silence if remaining >= len(silence) else silence[:remaining]
+            handle.write(chunk)
+            remaining -= len(chunk)
+
+    @classmethod
+    def _normalize_segment_audio(cls, path: Path, duration_seconds: float) -> None:
+        """Make every part exactly the video duration and always audio-bearing.
+
+        A concat-copy recording needs identical stream layouts in every part.
+        Padding a camera-audio gap with PCM silence avoids a missing AAC stream
+        on a short start/stop segment and keeps audio aligned with wall-clock
+        video boundaries.
+        """
+        expected = max(0, int(round(duration_seconds * ARCHIVE_AUDIO_BYTES_PER_SECOND)))
+        expected -= expected % 2
+        try:
+            current = path.stat().st_size if path.exists() else 0
+            if current < expected:
+                with path.open("ab") as handle:
+                    cls._write_silence(handle, expected - current)
+            elif current > expected:
+                with path.open("r+b") as handle:
+                    handle.truncate(expected)
+        except OSError as exc:
+            raise RuntimeError(f"could not prepare archive audio: {exc}") from exc
 
     def _encode_segment(self, raw_path: Path, segment: LocalSegment) -> None:
         output = segment.path
         temporary = output.with_name(f"{output.stem}.part{output.suffix}")
+        audio_path = self._audio_path(raw_path)
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:
             with self.lock:
@@ -279,14 +332,19 @@ class SessionArchiver:
             frame_rate = ARCHIVE_FPS
             if segment.frame_count:
                 frame_rate = max(1.0, min(60.0, segment.frame_count / max(0.1, segment.duration_seconds)))
+            self._normalize_segment_audio(audio_path, segment.duration_seconds)
             temporary.unlink(missing_ok=True)
             completed = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-f", "image2pipe", "-framerate", f"{frame_rate:.3f}", "-c:v", "mjpeg", "-i", str(raw_path),
-                    "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-f", "s16le", "-ar", str(ARCHIVE_AUDIO_RATE), "-ac", str(ARCHIVE_AUDIO_CHANNELS), "-i", str(audio_path),
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                     "-b:v", f"{ARCHIVE_VIDEO_MAX_KBPS}k", "-maxrate", f"{ARCHIVE_VIDEO_MAX_KBPS}k",
                     "-bufsize", f"{ARCHIVE_VIDEO_MAX_KBPS * 2}k", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", f"{ARCHIVE_AUDIO_KBPS}k", "-af", "apad",
+                    "-t", f"{segment.duration_seconds:.3f}",
                     "-movflags", "+faststart", str(temporary),
                 ],
                 capture_output=True,
@@ -297,6 +355,7 @@ class SessionArchiver:
                 raise RuntimeError(detail or "ffmpeg produced no MP4")
             temporary.replace(output)
             raw_path.unlink(missing_ok=True)
+            audio_path.unlink(missing_ok=True)
             if output.stat().st_size > MAX_ARCHIVE_SEGMENT_BYTES:
                 self._encode_preview(output, segment.duration_seconds)
         except Exception as exc:  # noqa: BLE001 - live publishing must never stop for archive encoding
@@ -325,9 +384,11 @@ class SessionArchiver:
             completed = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
-                    "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                     "-b:v", f"{bitrate_kbps}k", "-maxrate", f"{bitrate_kbps}k",
                     "-bufsize", f"{bitrate_kbps * 2}k", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", f"{ARCHIVE_PREVIEW_AUDIO_KBPS}k",
                     "-movflags", "+faststart", str(temporary),
                 ],
                 capture_output=True,
@@ -363,15 +424,22 @@ class SessionArchiver:
             return
         raw_path = Path(self.active_raw.name)
         self.active_raw.close()
+        audio_path = self._audio_path(raw_path)
+        if self.active_audio is not None:
+            audio_path = Path(self.active_audio.name)
+            self.active_audio.close()
         sequence = self.active_sequence
         started_at = self.active_segment_started_at
         frames = self.active_segment_frames
         self.active_raw = None
+        self.active_audio = None
         self.active_segment_started_at = None
         self.active_segment_frames = 0
+        self.active_segment_audio_bytes = 0
         self.active_sequence += 1
         if frames <= 0 or not raw_path.exists() or raw_path.stat().st_size == 0:
             raw_path.unlink(missing_ok=True)
+            audio_path.unlink(missing_ok=True)
             return
         segment = LocalSegment(
             session_id=self.active["session_id"],
@@ -381,6 +449,7 @@ class SessionArchiver:
             path=self.active_dir / f"segment-{sequence:05d}.mp4",
             frame_count=frames,
         )
+        self._normalize_segment_audio(audio_path, segment.duration_seconds)
 
         sidecar = segment.path.with_suffix(".json")
         sidecar.write_text(json.dumps({
@@ -637,6 +706,41 @@ class SessionArchiver:
                 return
             self.active_raw.write(frame)
             self.active_segment_frames += 1
+
+    def write_audio(self, pcm: bytes) -> None:
+        """Persist camera PCM next to the active JPEG segment.
+
+        The publisher receives 50 ms packets from the same local capture
+        session as the frames.  We put a short zero-filled gap in front of a
+        late first packet, then normalize the tail when the video part closes.
+        This keeps audio and video close in time without ever slowing the live
+        relay or the transcription path.
+        """
+        if len(pcm) % 2:
+            pcm = pcm[:-1]
+        if not pcm:
+            return
+        with self.lock:
+            if self.active_audio is None or self.active_segment_started_at is None:
+                return
+            packet_seconds = len(pcm) / ARCHIVE_AUDIO_BYTES_PER_SECOND
+            packet_started_at = max(
+                self.active_segment_started_at,
+                time.time() - packet_seconds,
+            )
+            expected_bytes = int(
+                (packet_started_at - self.active_segment_started_at)
+                * ARCHIVE_AUDIO_BYTES_PER_SECOND
+            )
+            expected_bytes -= expected_bytes % 2
+            if expected_bytes > self.active_segment_audio_bytes:
+                self._write_silence(
+                    self.active_audio,
+                    expected_bytes - self.active_segment_audio_bytes,
+                )
+                self.active_segment_audio_bytes = expected_bytes
+            self.active_audio.write(pcm)
+            self.active_segment_audio_bytes += len(pcm)
 
     def append_transcript(self, line: dict[str, Any]) -> None:
         with self.lock:
@@ -1073,8 +1177,13 @@ async def publish_frames(session: aiohttp.ClientSession, send: Any, stop: asynci
                 pass
 
 
-async def publish_audio(session: aiohttp.ClientSession, send: Any, stop: asyncio.Event) -> None:
-    """Relay only USB-camera PCM; browser playback happens on the public site.
+async def publish_audio(
+    session: aiohttp.ClientSession,
+    send: Any,
+    stop: asyncio.Event,
+    archiver: SessionArchiver,
+) -> None:
+    """Relay and archive USB-camera PCM; browser playback stays on public site.
 
     ``/stream.pcm`` is a local, endless byte stream. Reframe it into short,
     sample-aligned WebSocket messages so temporary network jitter cannot turn
@@ -1096,6 +1205,7 @@ async def publish_audio(session: aiohttp.ClientSession, send: Any, stop: asyncio
                     while len(buffer) >= LIVE_AUDIO_FRAME_BYTES:
                         pcm = bytes(buffer[:LIVE_AUDIO_FRAME_BYTES])
                         del buffer[:LIVE_AUDIO_FRAME_BYTES]
+                        archiver.write_audio(pcm)
                         await send(LIVE_AUDIO_MAGIC + pcm)
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
             print(f"  local audio: {exc}", file=sys.stderr)
@@ -1125,7 +1235,7 @@ async def connected_publisher(stop: asyncio.Event, archiver: SessionArchiver) ->
 
                     status_task = asyncio.create_task(publish_status(session, send, stop, archiver))
                     frames_task = asyncio.create_task(publish_frames(session, send, stop, archiver))
-                    audio_task = asyncio.create_task(publish_audio(session, send, stop))
+                    audio_task = asyncio.create_task(publish_audio(session, send, stop, archiver))
                     stop_task = asyncio.create_task(stop.wait())
                     done, pending = await asyncio.wait(
                         {status_task, frames_task, audio_task, stop_task},
