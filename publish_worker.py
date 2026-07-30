@@ -231,6 +231,13 @@ class SessionArchiver:
         with self.lock:
             self.uploaded.clear()
 
+    def wait_for_encoding(self, timeout: float = 180.0) -> None:
+        """Finish the active MP4 job before a graceful publisher shutdown."""
+        deadline = time.monotonic() + timeout
+        for thread in list(self.encoding):
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+
     def manifests(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         for metadata_path in self.root.glob("*/metadata.json"):
@@ -387,6 +394,12 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
                     transcript_id = line_id
                     event = dict(line)
                     event["received_at"] = time.time()
+                    # The transcriber reports time from its own process start.
+                    # Archive and public viewers need time from this recording,
+                    # otherwise a brand-new live session can look historical.
+                    event["started"] = round(
+                        max(0.0, event["received_at"] - float(current_session["started_at"])), 2
+                    )
                     archiver.append_transcript(event)
                     await send({"type": "transcript", "line": event})
         await upload_next_segment(archiver, send)
@@ -482,6 +495,7 @@ async def main() -> None:
     print(f"Sam Cam public publisher\n  local: {LOCAL_URL}\n  relay: {RELAY_URL}\n  worker: {WORKER}\n  archive: {ARCHIVE_ROOT}")
     await connected_publisher(stop, archiver)
     archiver.stop()
+    archiver.wait_for_encoding()
 
 
 if __name__ == "__main__":
