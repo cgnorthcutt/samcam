@@ -145,12 +145,15 @@ While a session is active or just ended:
 - Parts close roughly every **five minutes** by default
   (`SAMCAM_ARCHIVE_SEGMENT_SECONDS=300`). They can appear as playable parts
   before the full session is ready.
-- A background job stitches finished parts into one final MP4, then masters
-  its audio offline before upload. It does not block part playback; the
-  browser can switch to the final recording once it arrives.
-- The publisher uploads the completed MP4 in durable chunks, plus the accepted
-  transcript and analytics. Allow this to finish before turning off the laptop
-  if the new recording must be available publicly.
+- A background job stitches finished parts into an unmastered **original** MP4,
+  then creates a separate offline-improved **archive** MP4. It does not block
+  part playback; the browser can switch to the final recording once it arrives.
+- Archive shows both tracks in an **Audio A/B comparison** panel: the original
+  camera capture and the improved archive audio each have their own listener
+  and live waveform viewer. The enhanced MP4 remains the primary video player.
+- The publisher uploads both completed MP4s in durable chunks, plus the
+  accepted transcript and analytics. Allow this to finish before turning off
+  the laptop if the new recording must be available publicly.
 
 Archive is durable only after the Render Postgres-backed relay has accepted the
 uploads. If the relay shows **Archive is temporarily unavailable** or
@@ -181,9 +184,10 @@ biomechanics.
 ### Archive audio mastering and restoration
 
 Live sound is intentionally optimized for low latency and feedback safety. For
-a newly finished session, the publisher makes an offline-only audio decision
-after stitching and before it uploads the final MP4; this never delays Live or
-the playable archive parts. Healthy full-bandwidth stereo audio (at least
+a newly finished session, the publisher retains the unmodified stitched camera
+MP4, then makes an offline-only audio decision for a second, improved MP4;
+this never delays Live or the playable archive parts. Healthy full-bandwidth
+stereo audio (at least
 44.1 kHz, two channels, and 80 kb/s) is packet-remuxed with `-c:a copy` and
 verified against the source AAC packet hashes—no filters, downmixing, resample,
 normalization, or re-encode. The known low-rate mono USB body-camera profile

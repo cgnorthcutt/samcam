@@ -84,6 +84,7 @@ LIVE_AUDIO_MAGIC = b"SCAU"
 LIVE_AUDIO_FRAME_BYTES = 1_600  # 50 ms at 16 kHz mono s16le
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
+ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
 ANALYTICS_SCHEMA_VERSION = 1
 
 
@@ -104,6 +105,7 @@ class LocalRecordingChunk:
     index: int
     count: int
     size_bytes: int
+    variant: str = "improved"
 
 
 def archive_preview_bitrate_kbps(duration_seconds: float) -> int:
@@ -247,8 +249,8 @@ class SessionArchiver:
         self.stitch_retry_after: dict[str, float] = {}
         self.analyzing: dict[str, threading.Thread] = {}
         self.uploaded: set[tuple[str, int]] = set()
-        self.uploaded_recording_chunks: set[tuple[str, int]] = set()
-        self.completed_recording_uploads: set[str] = set()
+        self.uploaded_recording_chunks: set[tuple[str, str, int]] = set()
+        self.completed_recording_uploads: set[tuple[str, str]] = set()
         self.uploaded_analytics: set[str] = set()
         self.errors: list[str] = []
 
@@ -267,6 +269,11 @@ class SessionArchiver:
     @staticmethod
     def _recording_path(session_dir: Path) -> Path:
         return session_dir / "recording.mp4"
+
+    @staticmethod
+    def _original_recording_path(session_dir: Path) -> Path:
+        """The unmastered stitched camera recording kept for A/B comparison."""
+        return session_dir / "recording.original.mp4"
 
     @staticmethod
     def _preview_path(segment_path: Path) -> Path:
@@ -569,9 +576,9 @@ class SessionArchiver:
     def _master_recording_audio(source: Path, destination: Path) -> None:
         """Create the final speech-first MP4 without touching the live path.
 
-        ``source`` is the just-concatenated temporary MP4.  The restoration
-        helper stream-copies its H.264 video, re-encodes only AAC audio, and
-        verifies the result before atomically producing ``destination``.
+        ``source`` is the retained, unmastered stitched MP4. The restoration
+        helper leaves healthy stereo sources intact and repairs only eligible
+        low-rate body-camera audio before atomically producing ``destination``.
         """
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
@@ -591,11 +598,15 @@ class SessionArchiver:
         session_id = str(metadata["session_id"])
         session_dir = self.root / session_id
         output = self._recording_path(session_dir)
+        original = self._original_recording_path(session_dir)
         temporary = output.with_name(f"{output.stem}.part{output.suffix}")
         mastered_temporary = output.with_name(f"{output.stem}.mastered.part{output.suffix}")
         manifest = session_dir / ".recording.ffconcat"
         try:
-            if output.exists() and output.stat().st_size > 0:
+            if (
+                output.exists() and output.stat().st_size > 0
+                and original.exists() and original.stat().st_size > 0
+            ):
                 return
             with self.lock:
                 self._recover_session_segments_locked(metadata)
@@ -617,11 +628,15 @@ class SessionArchiver:
             if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
                 detail = completed.stderr.decode(errors="replace").strip()[-500:]
                 raise RuntimeError(detail or "ffmpeg did not create a stitched recording")
+            # Keep the raw camera capture before any post-processing. This is
+            # intentionally a full MP4 (not just extracted audio) so Archive
+            # can provide an honest time-aligned before/after listener.
+            temporary.replace(original)
             if not ARCHIVE_AUDIO_RESTORE_ENABLED:
-                temporary.replace(output)
+                shutil.copyfile(original, output)
             else:
                 try:
-                    self._master_recording_audio(temporary, mastered_temporary)
+                    self._master_recording_audio(original, mastered_temporary)
                     mastered_temporary.replace(output)
                 except RestorationError as exc:
                     # Archive availability wins if an optional offline repair
@@ -630,7 +645,7 @@ class SessionArchiver:
                     with self.lock:
                         self.errors.append(f"archive audio master {session_id}: {exc}"[-600:])
                         del self.errors[:-10]
-                    temporary.replace(output)
+                    shutil.copyfile(original, output)
         except Exception as exc:  # noqa: BLE001 - individual archive recovery must not stop live publishing
             with self.lock:
                 self.errors.append(f"archive recording {session_id}: {exc}"[-600:])
@@ -656,8 +671,15 @@ class SessionArchiver:
         session_id = str(metadata["session_id"])
         session_dir = self.root / session_id
         output = self._recording_path(session_dir)
+        original = self._original_recording_path(session_dir)
         self._recover_session_segments_locked(metadata)
-        if session_id in self.stitching or (output.exists() and output.stat().st_size > 0):
+        if (
+            session_id in self.stitching
+            or (
+                output.exists() and output.stat().st_size > 0
+                and original.exists() and original.stat().st_size > 0
+            )
+        ):
             return
         if time.monotonic() < self.stitch_retry_after.get(session_id, 0.0):
             return
@@ -917,45 +939,56 @@ class SessionArchiver:
             if not metadata.get("ended_at"):
                 continue
             session_id = str(metadata["session_id"])
-            path = self._recording_path(self.root / session_id)
-            try:
-                size_bytes = path.stat().st_size
-            except OSError:
-                continue
-            if size_bytes <= 0:
-                continue
-            count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
-            for index in range(count):
-                if (session_id, index) not in self.uploaded_recording_chunks:
-                    return LocalRecordingChunk(session_id, path, index, count, size_bytes)
+            session_dir = self.root / session_id
+            # Keep the enhanced MP4 as the primary Archive player. Its raw
+            # counterpart is uploaded immediately after and powers A/B audio
+            # comparison without delaying ordinary archive playback.
+            for variant, path in (
+                ("improved", self._recording_path(session_dir)),
+                ("original", self._original_recording_path(session_dir)),
+            ):
+                try:
+                    size_bytes = path.stat().st_size
+                except OSError:
+                    continue
+                if size_bytes <= 0:
+                    continue
+                count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
+                for index in range(count):
+                    if (variant, session_id, index) not in self.uploaded_recording_chunks:
+                        return LocalRecordingChunk(session_id, path, index, count, size_bytes, variant)
         return None
 
     def mark_recording_chunk_uploaded(self, chunk: LocalRecordingChunk) -> None:
         with self.lock:
-            self.uploaded_recording_chunks.add((chunk.session_id, chunk.index))
+            self.uploaded_recording_chunks.add((chunk.variant, chunk.session_id, chunk.index))
 
-    def next_recording_completion(self) -> tuple[str, int, int] | None:
+    def next_recording_completion(self) -> tuple[str, str, int, int] | None:
         for metadata in sorted(self.manifests(), key=lambda item: -float(item.get("started_at") or 0)):
             if not metadata.get("ended_at"):
                 continue
             session_id = str(metadata["session_id"])
-            if session_id in self.completed_recording_uploads:
-                continue
-            path = self._recording_path(self.root / session_id)
-            try:
-                size_bytes = path.stat().st_size
-            except OSError:
-                continue
-            if size_bytes <= 0:
-                continue
-            count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
-            if all((session_id, index) in self.uploaded_recording_chunks for index in range(count)):
-                return session_id, count, size_bytes
+            session_dir = self.root / session_id
+            for variant, path in (
+                ("improved", self._recording_path(session_dir)),
+                ("original", self._original_recording_path(session_dir)),
+            ):
+                if (variant, session_id) in self.completed_recording_uploads:
+                    continue
+                try:
+                    size_bytes = path.stat().st_size
+                except OSError:
+                    continue
+                if size_bytes <= 0:
+                    continue
+                count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
+                if all((variant, session_id, index) in self.uploaded_recording_chunks for index in range(count)):
+                    return variant, session_id, count, size_bytes
         return None
 
-    def mark_recording_complete(self, session_id: str) -> None:
+    def mark_recording_complete(self, variant: str, session_id: str) -> None:
         with self.lock:
-            self.completed_recording_uploads.add(session_id)
+            self.completed_recording_uploads.add((variant, session_id))
 
     def next_analytics(self) -> tuple[str, dict[str, Any]] | None:
         for metadata in sorted(self.manifests(), key=lambda item: -float(item.get("started_at") or 0)):
@@ -1071,14 +1104,16 @@ async def upload_next_recording_chunk(archiver: SessionArchiver, send: Any) -> b
         return False
     if not data:
         return False
+    is_original = chunk.variant == "original"
     metadata = json.dumps({
-        "type": "archive_recording_chunk",
+        "type": "archive_original_recording_chunk" if is_original else "archive_recording_chunk",
         "session_id": chunk.session_id,
         "index": chunk.index,
         "count": chunk.count,
         "size_bytes": chunk.size_bytes,
     }, separators=(",", ":")).encode()
-    await send(ARCHIVE_RECORDING_MAGIC + len(metadata).to_bytes(4, "big") + metadata + data)
+    magic = ARCHIVE_ORIGINAL_RECORDING_MAGIC if is_original else ARCHIVE_RECORDING_MAGIC
+    await send(magic + len(metadata).to_bytes(4, "big") + metadata + data)
     archiver.mark_recording_chunk_uploaded(chunk)
     return True
 
@@ -1087,14 +1122,14 @@ async def publish_completed_recording(archiver: SessionArchiver, send: Any) -> N
     completed = archiver.next_recording_completion()
     if completed is None:
         return
-    session_id, chunk_count, size_bytes = completed
+    variant, session_id, chunk_count, size_bytes = completed
     await send({
-        "type": "archive_recording_complete",
+        "type": "archive_original_recording_complete" if variant == "original" else "archive_recording_complete",
         "session_id": session_id,
         "chunk_count": chunk_count,
         "size_bytes": size_bytes,
     })
-    archiver.mark_recording_complete(session_id)
+    archiver.mark_recording_complete(variant, session_id)
 
 
 async def publish_next_analytics(archiver: SessionArchiver, send: Any) -> None:

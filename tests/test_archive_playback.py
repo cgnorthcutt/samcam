@@ -45,13 +45,29 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
 
         final = await store.session_detail(session_id)
         self.assertTrue(final["recording_ready"])
+        self.assertFalse(final["original_recording_ready"])
         self.assertEqual([part["sequence"] for part in final["segments"]], [0])
+
+        original = b"unmastered-camera-video"
+        await store.save_original_recording_chunk(
+            {"session_id": session_id, "index": 0, "count": 1, "size_bytes": len(original)},
+            original,
+        )
+        await store.complete_original_recording(session_id, 1, len(original))
+        comparison = await store.session_detail(session_id)
+        self.assertTrue(comparison["original_recording_ready"])
+        self.assertEqual((await store.original_recording(session_id))["data"], original)
 
     def test_public_ui_keeps_a_second_player_for_nonblocking_handoff(self) -> None:
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
         self.assertIn('id="archiveVideoNext"', page)
         self.assertIn("handoffToStitchedRecording", page)
         self.assertIn("renderArchiveParts(detail)", page)
+        self.assertIn('id="archiveAudioComparison"', page)
+        self.assertIn("Original camera audio", page)
+        self.assertIn("Improved archive audio", page)
+        self.assertIn("function renderArchiveAudioComparison(detail)", page)
+        self.assertIn("/original.mp4", page)
 
     def test_public_ui_recovers_from_a_transient_archive_video_failure(self) -> None:
         """A 503 after detail success must not leave a gray 0:00 media player."""

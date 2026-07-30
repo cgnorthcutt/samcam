@@ -18,12 +18,14 @@ from unittest.mock import patch
 
 from cloud.main import (
     ARCHIVE_MAGIC,
+    ARCHIVE_ORIGINAL_RECORDING_MAGIC,
     ARCHIVE_RECORDING_MAGIC,
     LIVE_AUDIO_MAGIC,
     FRAME_FRESH_SECONDS,
     ArchiveStore,
     WorkerState,
     parse_archive_recording_chunk,
+    parse_archive_original_recording_chunk,
     parse_archive_segment,
     parse_live_audio,
     worker_payload,
@@ -121,12 +123,17 @@ class RelayAndArchiveContracts(unittest.IsolatedAsyncioTestCase):
             {"session_id": session_id, "index": 1, "count": 2, "size_bytes": 10}, b"world"
         )
         await store.complete_recording(session_id, 2, 10)
+        await store.save_original_recording_chunk(
+            {"session_id": session_id, "index": 0, "count": 1, "size_bytes": 8}, b"camera!!"
+        )
+        await store.complete_original_recording(session_id, 1, 8)
         await store.replace_transcript(session_id, [{"id": "1", "started": 1.25, "text": "Testing works."}])
         await store.save_analytics(session_id, {"clip": {"id": session_id}, "samples": [{"time": 0}]})
 
         sessions = await store.list_sessions("curtis")
         self.assertEqual([item["session_id"] for item in sessions], [session_id])
         self.assertTrue(sessions[0]["recording_ready"])
+        self.assertTrue(sessions[0]["original_recording_ready"])
         self.assertTrue(sessions[0]["analytics_ready"])
         self.assertEqual(sessions[0]["transcript_count"], 1)
 
@@ -136,11 +143,13 @@ class RelayAndArchiveContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["segments"][0]["sequence"], 0)
         self.assertEqual(detail["transcript"][0]["text"], "Testing works.")
         self.assertEqual((await store.recording(session_id))["data"], b"helloworld")
+        self.assertEqual((await store.original_recording(session_id))["data"], b"camera!!")
         self.assertEqual((await store.analytics(session_id))["clip"]["id"], session_id)
 
         await store.delete_session(session_id)
         self.assertIsNone(await store.session_detail(session_id))
         self.assertIsNone(await store.recording(session_id))
+        self.assertIsNone(await store.original_recording(session_id))
         self.assertIsNone(await store.analytics(session_id))
         # A disconnected publisher may try to replay old local files.  The
         # durable tombstone must still keep the deletion final.
@@ -152,11 +161,16 @@ class RelayAndArchiveContracts(unittest.IsolatedAsyncioTestCase):
         recording = parse_archive_recording_chunk(
             _envelope(ARCHIVE_RECORDING_MAGIC, "archive_recording_chunk", b"chunk")
         )
+        original_recording = parse_archive_original_recording_chunk(
+            _envelope(ARCHIVE_ORIGINAL_RECORDING_MAGIC, "archive_original_recording_chunk", b"original")
+        )
 
         self.assertEqual(segment, ({"type": "archive_segment", "session_id": "Curtis-contract-0001"}, b"part"))
         self.assertEqual(recording, ({"type": "archive_recording_chunk", "session_id": "Curtis-contract-0001"}, b"chunk"))
+        self.assertEqual(original_recording, ({"type": "archive_original_recording_chunk", "session_id": "Curtis-contract-0001"}, b"original"))
         self.assertIsNone(parse_archive_segment(_envelope(ARCHIVE_MAGIC, "archive_recording_chunk")))
         self.assertIsNone(parse_archive_recording_chunk(_envelope(ARCHIVE_RECORDING_MAGIC, "archive_segment")))
+        self.assertIsNone(parse_archive_original_recording_chunk(_envelope(ARCHIVE_ORIGINAL_RECORDING_MAGIC, "archive_recording_chunk")))
         self.assertIsNone(parse_live_audio(b"not-live-audio"))
         self.assertEqual(parse_live_audio(LIVE_AUDIO_MAGIC + b"\x01\x00"), b"\x01\x00")
         self.assertIsNone(parse_live_audio(LIVE_AUDIO_MAGIC + b"\x01"))

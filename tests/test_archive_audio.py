@@ -96,8 +96,17 @@ class ArchiveAudioTests(unittest.TestCase):
             shutil.copyfile(part.path, second)
             archiver._stitch_recording({"session_id": session_dir.name})
             recording = session_dir / "recording.mp4"
+            original_recording = session_dir / "recording.original.mp4"
             self.assertTrue(recording.exists())
+            self.assertTrue(original_recording.exists())
             self.assertIn(("audio", "aac"), self._probe_streams(recording))
+            self.assertIn(("audio", "aac"), self._probe_streams(original_recording))
+            # The A/B source remains the unmastered concat output. The raw
+            # body-camera AAC is 16 kHz mono while the primary archive MP4 is
+            # the separately mastered, 48 kHz playback version.
+            original_audio = self._probe_audio(original_recording)
+            self.assertEqual(original_audio["sample_rate"], "16000")
+            self.assertEqual(original_audio["channels"], 1)
             # The final MP4, unlike a relay-safe preview, is mastered after
             # stitching: it preserves copied video and uses 48 kHz AAC audio.
             mastered_audio = self._probe_audio(recording)
