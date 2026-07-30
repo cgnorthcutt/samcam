@@ -1,3 +1,4 @@
+# Sam Cam local artifacts
 .cache/
 .venv/
 __pycache__/
@@ -6,3 +7,19 @@ __pycache__/
 bodycam_capture
 sources/
 *.part
+
+# Python packaging and test artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Local configuration and editor state
+.env
+.envrc
+.vscode/
+.idea/
