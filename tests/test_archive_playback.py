@@ -53,6 +53,16 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("handoffToStitchedRecording", page)
         self.assertIn("renderArchiveParts(detail)", page)
 
+    def test_public_ui_recovers_from_a_transient_archive_video_failure(self) -> None:
+        """A 503 after detail success must not leave a gray 0:00 media player."""
+        page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
+
+        self.assertIn("function recoverArchiveMedia(video)", page)
+        self.assertIn("Saved video will retry automatically.", page)
+        self.assertIn("archivePlayers().forEach(video=>video.addEventListener('error'", page)
+        self.assertIn("reconnecting full recording", page)
+        self.assertIn("retryArchiveDetail(detail.session_id)", page)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
