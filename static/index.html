@@ -271,10 +271,23 @@
     .analytics-charts { grid-template-columns: 1fr; }
   }
 </style>
+<link rel="stylesheet" href="/samsara-ui.css">
 </head>
 <body>
+<aside class="app-rail" aria-label="Application navigation">
+  <div class="rail-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5M12 3.5v8.5h8.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg></div>
+  <nav class="rail-nav" aria-label="Workspace views">
+    <button class="rail-item active" type="button" data-rail-tab="stream" aria-label="Live stream" title="Live stream"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 4-2v8l-4-2z"/></svg></button>
+    <button class="rail-item" type="button" data-rail-tab="archive" aria-label="Archive" title="Archive"><svg viewBox="0 0 24 24"><path d="M4 8h16v11H4z"/><path d="M7 5h10v3M8 12h8M8 15h5"/></svg></button>
+    <button class="rail-item" type="button" data-rail-tab="analytics" aria-label="Analytics" title="Analytics"><svg viewBox="0 0 24 24"><path d="M4 20V4M4 20h16"/><path d="m7 16 4-5 3 2 5-7"/></svg></button>
+  </nav>
+  <div class="rail-bottom" aria-hidden="true">
+    <span class="rail-item rail-utility"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7.2 7.2 0 0 0-.09-1.13l2-1.56-2-3.46-2.36.95a7.4 7.4 0 0 0-1.96-1.13L14.25 3h-4.5l-.34 2.73A7.4 7.4 0 0 0 7.45 6.86l-2.36-.95-2 3.46 2 1.56A7.2 7.2 0 0 0 5 12c0 .39.03.76.09 1.13l-2 1.56 2 3.46 2.36-.95c.6.48 1.26.86 1.96 1.13L9.75 21h4.5l.34-2.73c.7-.27 1.36-.65 1.96-1.13l2.36.95 2-3.46-2-1.56c.06-.37.09-.74.09-1.13Z"/></svg></span>
+  </div>
+</aside>
 <header>
   <div class="brand"><span id="dot" class="dot"></span> Sam Cam</div>
+  <span class="workspace-label">Camera operations</span>
   <div class="meta" id="meta"></div>
   <div class="tabs" role="tablist" aria-label="Sam Cam views">
     <button id="tabStream" class="on" role="tab" aria-selected="true" aria-controls="streamView">Stream</button>
@@ -465,10 +478,16 @@ function showTab(which) {
   }
   if (which !== 'archive') player.pause();
   if (which === 'archive') pollClips();
+  document.querySelectorAll('[data-rail-tab]').forEach(item => {
+    const active = item.dataset.railTab === which;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-current', active ? 'page' : 'false');
+  });
 }
 $('tabStream').onclick = () => showTab('stream');
 $('tabArchive').onclick = () => showTab('archive');
 $('tabAnalytics').onclick = () => showTab('analytics');
+document.querySelectorAll('[data-rail-tab]').forEach(button => button.onclick = () => showTab(button.dataset.railTab));
 
 /* ---------- continuous stream ---------- */
 let streaming = false;

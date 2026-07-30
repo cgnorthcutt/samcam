@@ -31,10 +31,23 @@
   .market-fit { border-top:1px solid var(--line); padding-top:15px; } .market-fit h2 { margin:0 0 8px; font-size:14px; } .fit-table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; } .fit-table th,.fit-table td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); } .fit-table th { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; } .fit-score { display:flex; align-items:center; gap:8px; min-width:110px; } .fit-bar { width:76px; height:5px; border-radius:999px; background:var(--line); overflow:hidden; } .fit-bar span { display:block; height:100%; background:var(--green); } .analytics-foot { color:var(--muted); font-size:11px; display:flex; gap:14px; flex-wrap:wrap; } .analytics-foot b { color:var(--text); font-weight:600; }
   @media (max-width:900px) { header { flex-wrap:wrap; gap:10px; } .worker-form { margin-left:0; width:100%; } .worker-form input { flex:1; } .live-grid,.archive-grid,.analytics-grid { grid-template-columns:1fr; } .archive-list { min-height:0; } #archiveList { max-height:250px; } .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } #transcript { min-height:180px; max-height:280px; } .archive-details { grid-template-columns:1fr; } #archiveTranscript { border-left:0; border-top:1px solid var(--line); } .analytics-field,.analytics-field select { width:100%; min-width:0; max-width:none; } .assumption-controls { grid-template-columns:1fr; } }
 </style>
+<link rel="stylesheet" href="/static/samsara-ui.css">
 </head>
 <body>
+<aside class="app-rail" aria-label="Application navigation">
+  <div class="rail-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5M12 3.5v8.5h8.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg></div>
+  <nav class="rail-nav" aria-label="Workspace views">
+    <button class="rail-item active" type="button" data-rail-tab="live" aria-label="Live stream" title="Live stream"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 4-2v8l-4-2z"/></svg></button>
+    <button class="rail-item" type="button" data-rail-tab="archive" aria-label="Archive" title="Archive"><svg viewBox="0 0 24 24"><path d="M4 8h16v11H4z"/><path d="M7 5h10v3M8 12h8M8 15h5"/></svg></button>
+    <button class="rail-item" type="button" data-rail-tab="analytics" aria-label="Analytics" title="Analytics"><svg viewBox="0 0 24 24"><path d="M4 20V4M4 20h16"/><path d="m7 16 4-5 3 2 5-7"/></svg></button>
+  </nav>
+  <div class="rail-bottom" aria-hidden="true">
+    <span class="rail-item rail-utility"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7.2 7.2 0 0 0-.09-1.13l2-1.56-2-3.46-2.36.95a7.4 7.4 0 0 0-1.96-1.13L14.25 3h-4.5l-.34 2.73A7.4 7.4 0 0 0 7.45 6.86l-2.36-.95-2 3.46 2 1.56A7.2 7.2 0 0 0 5 12c0 .39.03.76.09 1.13l-2 1.56 2 3.46 2.36-.95c.6.48 1.26.86 1.96 1.13L9.75 21h4.5l.34-2.73c.7-.27 1.36-.65 1.96-1.13l2.36.95 2-3.46-2-1.56c.06-.37.09-.74.09-1.13Z"/></svg></span>
+  </div>
+</aside>
 <header>
   <div class="brand"><span id="dot" class="dot"></span>Sam Cam</div>
+  <span class="workspace-label">Camera operations</span>
   <nav class="tabs" aria-label="Sam Cam views">
     <button class="selected" data-tab="live">Live</button>
     <button data-tab="archive">Archive</button>
@@ -257,8 +270,9 @@ $('analyticsSession').addEventListener('change',event=>loadAnalytics(event.targe
 ['startCharge','mountDistance'].forEach(id=>$(id).addEventListener('input',renderAnalytics));
 $('targetSession').addEventListener('change',renderAnalytics);
 
-function setTab(tab) { document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===tab)); $('liveView').classList.toggle('hidden',tab!=='live'); $('archiveView').classList.toggle('hidden',tab!=='archive'); $('analyticsView').classList.toggle('hidden',tab!=='analytics'); if(tab==='archive') refreshArchives(); if(tab==='analytics') refreshAnalytics(); }
+function setTab(tab) { document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===tab)); document.querySelectorAll('[data-rail-tab]').forEach(button=>{const active=button.dataset.railTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-current',active?'page':'false');}); $('liveView').classList.toggle('hidden',tab!=='live'); $('archiveView').classList.toggle('hidden',tab!=='archive'); $('analyticsView').classList.toggle('hidden',tab!=='analytics'); if(tab==='archive') refreshArchives(); if(tab==='analytics') refreshAnalytics(); }
 document.querySelectorAll('[data-tab]').forEach(button=>button.addEventListener('click',()=>setTab(button.dataset.tab)));
+document.querySelectorAll('[data-rail-tab]').forEach(button=>button.addEventListener('click',()=>setTab(button.dataset.railTab)));
 $('audioToggle').addEventListener('click',()=>{ void toggleLiveAudio(); });
 $('workerForm').addEventListener('submit',event=>{event.preventDefault();setWorker($('worker').value);}); $('feed').addEventListener('load',()=>{ if(liveState.streaming){ feedReady=true; $('offline').classList.add('hidden'); } }); $('feed').addEventListener('error',()=>{ feedReady=false; if(liveState.streaming) setTimeout(()=>{ $('feed').src=url(`/stream/${encodeURIComponent(worker)}.mjpg`); },750); setTimeout(refreshStatus,500); });
 archivePlayers().forEach(video=>video.addEventListener('error',()=>recoverArchiveMedia(video)));
