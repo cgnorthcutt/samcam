@@ -370,6 +370,15 @@ class ArchiveStore:
             if row is None:
                 return None
             payload = row["payload"]
+            # asyncpg returns JSONB as a decoded object with some codecs and as
+            # a JSON string with others.  Accept both so a persisted analytics
+            # row that is visible in the archive list is also usable by the
+            # public per-video analytics endpoint.
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    return None
             return dict(payload) if isinstance(payload, dict) else None
         except Exception as exc:  # noqa: BLE001
             self.error = f"archive analytics read failed: {exc}"[-300:]
