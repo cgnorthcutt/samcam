@@ -48,6 +48,7 @@ class LocalSegment:
     started_at: float
     duration_seconds: float
     path: Path
+    frame_count: int = 0
 
 
 class SessionArchiver:
@@ -103,10 +104,18 @@ class SessionArchiver:
                 del self.errors[:-10]
             return
         try:
+            # The capture loop's frame rate is not fixed: it depends on the USB
+            # camera and the local browser/server load.  Archive parts are cut
+            # on wall time, so encode with the observed rate rather than a
+            # nominal 30 fps; otherwise a 10-second part recorded at 21 fps
+            # plays back as a misleading 7-second clip.
+            frame_rate = ARCHIVE_FPS
+            if segment.frame_count:
+                frame_rate = max(1.0, min(60.0, segment.frame_count / max(0.1, segment.duration_seconds)))
             completed = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "image2pipe", "-framerate", str(ARCHIVE_FPS), "-c:v", "mjpeg", "-i", str(raw_path),
+                    "-f", "image2pipe", "-framerate", f"{frame_rate:.3f}", "-c:v", "mjpeg", "-i", str(raw_path),
                     "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                     "-crf", "28", "-maxrate", "1100k", "-bufsize", "1800k", "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart", str(output),
@@ -122,6 +131,7 @@ class SessionArchiver:
                 "sequence": segment.sequence,
                 "started_at": segment.started_at,
                 "duration_seconds": segment.duration_seconds,
+                "frame_count": segment.frame_count,
             }, separators=(",", ":")))
             raw_path.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001 - live publishing must never stop for archive encoding
@@ -150,6 +160,7 @@ class SessionArchiver:
             started_at=started_at,
             duration_seconds=round(max(0.1, ended_at - started_at), 2),
             path=self.active_dir / f"segment-{sequence:05d}.mp4",
+            frame_count=frames,
         )
 
         def encode() -> None:
@@ -335,8 +346,13 @@ async def sync_archive_index(archiver: SessionArchiver, send: Any, exclude_sessi
         if metadata.get("session_id") == exclude_session_id:
             continue
         await send({"type": "archive_session", "session": metadata})
-        for line in archiver.transcript_lines(str(metadata["session_id"])):
-            await send({"type": "archive_transcript", "session_id": metadata["session_id"], "line": line})
+        # A reconnect can otherwise leave deleted or corrected historical text
+        # in the cloud copy forever. Treat the local archive as canonical.
+        await send({
+            "type": "archive_transcript_replace",
+            "session_id": metadata["session_id"],
+            "lines": archiver.transcript_lines(str(metadata["session_id"])),
+        })
 
 
 async def upload_next_segment(archiver: SessionArchiver, send: Any) -> None:

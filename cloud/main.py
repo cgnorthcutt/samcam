@@ -250,6 +250,59 @@ class ArchiveStore:
             self.error = f"archive transcript failed: {exc}"[-300:]
             print(self.error, flush=True)
 
+    async def replace_transcript(self, session_id: str, lines: list[dict[str, Any]]) -> None:
+        """Synchronize one archived session from the publisher's local source of truth."""
+        session_id = require_session_id(session_id)
+        records: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for line in lines[:1_000]:
+            text = " ".join(str(line.get("text", "")).split())[:1_000]
+            if not text:
+                continue
+            started_at = max(0.0, finite_timestamp(line.get("started"), 0.0))
+            line_key = str(line.get("id") or f"{started_at:.2f}:{text}")[:200]
+            if line_key in seen_keys:
+                continue
+            seen_keys.add(line_key)
+            records.append({
+                "session_id": session_id,
+                "line_key": line_key,
+                "text": text,
+                "started_at": started_at,
+                "received_at": finite_timestamp(line.get("received_at")),
+            })
+
+        self.memory_transcripts = {
+            key: record for key, record in self.memory_transcripts.items() if key[0] != session_id
+        }
+        self.memory_transcripts.update({(session_id, record["line_key"]): record for record in records})
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    await connection.execute(
+                        "DELETE FROM samcam_archive_transcripts WHERE session_id = $1", session_id
+                    )
+                    if records:
+                        await connection.executemany(
+                            """
+                            INSERT INTO samcam_archive_transcripts
+                              (session_id, line_key, started_at, received_at, text)
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            [
+                                (
+                                    record["session_id"], record["line_key"], record["started_at"],
+                                    record["received_at"], record["text"],
+                                )
+                                for record in records
+                            ],
+                        )
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive transcript sync failed: {exc}"[-300:]
+            print(self.error, flush=True)
+
     def _memory_summary(self, record: dict[str, Any]) -> dict[str, Any]:
         session_id = record["session_id"]
         segments = [value for (candidate, _), value in self.memory_segments.items() if candidate == session_id]
@@ -734,6 +787,12 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
             elif kind == "archive_session" and isinstance(payload.get("session"), dict):
                 try:
                     await archive.start_session(payload["session"], state.name)
+                except ValueError:
+                    pass
+            elif kind == "archive_transcript_replace" and isinstance(payload.get("lines"), list):
+                try:
+                    lines = [line for line in payload["lines"] if isinstance(line, dict)]
+                    await archive.replace_transcript(require_session_id(payload.get("session_id")), lines)
                 except ValueError:
                     pass
             elif kind in {"transcript", "archive_transcript"} and isinstance(payload.get("line"), dict):
