@@ -264,7 +264,19 @@ class SessionArchiver:
         return lines
 
     def next_segment(self) -> LocalSegment | None:
-        for metadata in self.manifests():
+        active = self.session()
+        active_id = active.get("session_id") if active else None
+        # A reconnect can discover many already-backed-up sessions. Always
+        # upload the active recording's next part first so Archive updates as
+        # the camera runs instead of waiting behind old duplicate checks.
+        manifests = sorted(
+            self.manifests(),
+            key=lambda item: (
+                item.get("session_id") != active_id,
+                -float(item.get("started_at") or 0),
+            ),
+        )
+        for metadata in manifests:
             session_id = str(metadata["session_id"])
             session_dir = self.root / session_id
             for path in sorted(session_dir.glob("segment-*.mp4")):
