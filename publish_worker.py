@@ -50,6 +50,9 @@ ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
     1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
 )
 RECONNECT_SECONDS = 2.0
+# A faster status heartbeat starts the public relay as soon as the laptop has
+# its first camera frame. Frame publishing itself remains continuous.
+STATUS_POLL_SECONDS = 0.5
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ANALYTICS_SCHEMA_VERSION = 1
@@ -1024,7 +1027,7 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
         await publish_next_analytics(archiver, send)
         await upload_next_segment(archiver, send)
         try:
-            await asyncio.wait_for(stop.wait(), timeout=1.0)
+            await asyncio.wait_for(stop.wait(), timeout=STATUS_POLL_SECONDS)
         except asyncio.TimeoutError:
             pass
 

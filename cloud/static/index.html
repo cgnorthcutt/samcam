@@ -233,7 +233,9 @@ $('targetSession').addEventListener('change',renderAnalytics);
 function setTab(tab) { document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===tab)); $('liveView').classList.toggle('hidden',tab!=='live'); $('archiveView').classList.toggle('hidden',tab!=='archive'); $('analyticsView').classList.toggle('hidden',tab!=='analytics'); if(tab==='archive') refreshArchives(); if(tab==='analytics') refreshAnalytics(); }
 document.querySelectorAll('[data-tab]').forEach(button=>button.addEventListener('click',()=>setTab(button.dataset.tab)));
 $('workerForm').addEventListener('submit',event=>{event.preventDefault();setWorker($('worker').value);}); $('feed').addEventListener('load',()=>{ if(liveState.streaming){ feedReady=true; $('offline').classList.add('hidden'); } }); $('feed').addEventListener('error',()=>{ feedReady=false; if(liveState.streaming) setTimeout(()=>{ $('feed').src=url(`/stream/${encodeURIComponent(worker)}.mjpg`); },750); setTimeout(refreshStatus,500); });
-refreshStatus(); refreshTranscript(); setInterval(refreshStatus,1000); setInterval(refreshTranscript,1250); setInterval(()=>{if(!$('archiveView').classList.contains('hidden'))refreshArchives(); if(!$('analyticsView').classList.contains('hidden'))refreshAnalytics();},5000);
+// Keep the public viewer responsive to a worker entering UVC mode. This is
+// status-only traffic; the image still streams continuously over MJPEG.
+refreshStatus(); refreshTranscript(); setInterval(refreshStatus,500); setInterval(refreshTranscript,1250); setInterval(()=>{if(!$('archiveView').classList.contains('hidden'))refreshArchives(); if(!$('analyticsView').classList.contains('hidden'))refreshAnalytics();},5000);
 </script>
 </body>
 </html>

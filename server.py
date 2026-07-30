@@ -500,11 +500,19 @@ class Library:
 SOI = b"\xff\xd8\xff"          # JPEG start-of-image
 EOI = b"\xff\xd9"              # JPEG end-of-image
 DEFAULT_FPS = 25.0
-LIVE_START_TIMEOUT = 10.0      # device present but never produced its first frame
+# The camera has to switch USB personalities before macOS can enumerate its
+# UVC interface, so no application can make that physical step instantaneous.
+# Once AVFoundation does report the device, however, fail a no-frame capture
+# quickly and reopen it instead of making viewers wait through a 10s dead
+# session (and then exponential backoff).
+LIVE_START_TIMEOUT = 4.0       # device present but never produced its first frame
 # A hardware button press can leave the UVC device enumerated briefly even
 # after it stops delivering frames. Keep the frozen-frame window short; the
 # UI independently reacts to the mode change as soon as macOS reports it.
 LIVE_STALL_TIMEOUT = 1.5       # device stopped delivering frames without disconnecting
+LIVE_RETRY_INITIAL = 0.25
+LIVE_RETRY_MAX = 2.0
+LIVE_DISCOVERY_INTERVAL = 0.25
 LIVE_CAPTURE_PROFILES = (
     # Confirmed native mode for the 1b3f:2002 GENERAL - UVC firmware.
     ("1280x720@30", (
@@ -567,7 +575,7 @@ class Streamer:
         self.live_profile: str | None = None
         self.live_error: str | None = None
         self.last_live_frame_at: float | None = None
-        self.live_retry_delay = 1.0
+        self.live_retry_delay = LIVE_RETRY_INITIAL
         self.stopping = threading.Event()
 
     # -- lifecycle -------------------------------------------------------
@@ -651,7 +659,9 @@ class Streamer:
                     self.live_error = str(exc)
                     print(f"  live capture error: {exc}", file=sys.stderr)
                     time.sleep(self.live_retry_delay)
-                    self.live_retry_delay = min(self.live_retry_delay * 2.0, 15.0)
+                    self.live_retry_delay = min(
+                        self.live_retry_delay * 2.0, LIVE_RETRY_MAX
+                    )
                 continue
 
             # The Stream tab is live-only. Archived recordings belong in the
@@ -661,7 +671,9 @@ class Streamer:
             self.live = False
             self.live_profile = None
             self.clear_frame()
-            time.sleep(1.0)
+            # Polling is deliberately faster than the USB personality change
+            # so the first live frame follows camera enumeration promptly.
+            time.sleep(LIVE_DISCOVERY_INTERVAL)
 
     def _play_live(self, selector: str, name: str) -> None:
         """Stream the camera's live UVC feed straight through.
@@ -810,7 +822,7 @@ class Streamer:
                 now = time.monotonic()
                 self.live_error = None
                 self.last_live_frame_at = time.time()
-                self.live_retry_delay = 1.0
+                self.live_retry_delay = LIVE_RETRY_INITIAL
                 if previous_frame_at is not None:
                     instantaneous = 1.0 / max(now - previous_frame_at, 0.001)
                     if 1.0 <= instantaneous <= 120.0:
@@ -965,7 +977,7 @@ class Streamer:
                 now = time.monotonic()
                 self.live_error = None
                 self.last_live_frame_at = time.time()
-                self.live_retry_delay = 1.0
+                self.live_retry_delay = LIVE_RETRY_INITIAL
                 if previous_frame_at is not None:
                     instantaneous = 1.0 / max(now - previous_frame_at, 0.001)
                     if 1.0 <= instantaneous <= 120.0:
@@ -993,7 +1005,10 @@ class Streamer:
 
 _live_cache: tuple[float, tuple[str, str] | None] = (0.0, None)
 _live_lock = threading.Lock()
-LIVE_DEVICE_CACHE_TTL = 1.0
+# Device discovery invokes AVFoundation through ffmpeg, so retain a small
+# cache. Half a second keeps the process light without making a newly
+# enumerated UVC camera feel sluggish.
+LIVE_DEVICE_CACHE_TTL = 0.5
 
 
 def list_capture_devices() -> list[tuple[int, str]]:
