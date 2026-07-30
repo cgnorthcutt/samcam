@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 MAX_FRAME_BYTES = 5_000_000
+MAX_LIVE_AUDIO_PACKET_BYTES = 64_000
 MAX_ARCHIVE_SEGMENT_BYTES = 8_000_000
 MAX_ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 FRAME_FRESH_SECONDS = 5.0
@@ -40,6 +41,8 @@ WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{3,127}$")
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
+LIVE_AUDIO_MAGIC = b"SCAU"
+LIVE_AUDIO_HISTORY_PACKETS = 80
 
 
 def require_worker_name(raw_name: str) -> tuple[str, str]:
@@ -672,6 +675,11 @@ class WorkerState:
     frame: bytes | None = None
     frame_sequence: int = 0
     last_frame_at: float | None = None
+    audio_sequence: int = 0
+    audio_packets: deque[tuple[int, bytes]] = field(
+        default_factory=lambda: deque(maxlen=LIVE_AUDIO_HISTORY_PACKETS)
+    )
+    last_audio_at: float | None = None
     last_seen_at: float | None = None
     connected_at: float | None = None
     active_session_id: str | None = None
@@ -727,16 +735,21 @@ async def existing_worker(raw_name: str) -> WorkerState | None:
 
 def worker_payload(state: WorkerState | None) -> dict[str, Any]:
     if state is None:
-        return {"worker": None, "streaming": False, "last_frame_at": None, "source": None, "session_id": None, "transcript_count": 0}
+        return {"worker": None, "streaming": False, "last_frame_at": None, "audio_available": False, "source": None, "session_id": None, "transcript_count": 0}
+    now = time.time()
+    streaming = state.is_streaming(now)
     return {
         "worker": state.name,
-        "streaming": state.is_streaming(),
+        "streaming": streaming,
         "last_frame_at": state.last_frame_at,
+        "audio_available": bool(
+            state.last_audio_at is not None and now - state.last_audio_at < FRAME_FRESH_SECONDS
+        ),
         "source": state.source,
         "connected_at": state.connected_at,
-        "session_id": state.active_session_id if state.is_streaming() else None,
-        "session_started_at": state.session_started_at if state.is_streaming() else None,
-        "transcript_count": len(state.transcripts) if state.is_streaming() else 0,
+        "session_id": state.active_session_id if streaming else None,
+        "session_started_at": state.session_started_at if streaming else None,
+        "transcript_count": len(state.transcripts) if streaming else 0,
     }
 
 
@@ -750,6 +763,8 @@ async def apply_status(state: WorkerState, token: object, message: dict[str, Any
         state.source = str(source)[:160] if source else None
         if not state.live:
             state.frame = None
+            state.audio_packets.clear()
+            state.last_audio_at = None
 
 
 async def apply_session_start(state: WorkerState, token: object, message: dict[str, Any]) -> None:
@@ -767,6 +782,8 @@ async def apply_session_start(state: WorkerState, token: object, message: dict[s
         state.session_started_at = started_at
         state.transcripts.clear()
         state.transcript_fingerprints.clear()
+        state.audio_packets.clear()
+        state.last_audio_at = None
         if source:
             state.source = source
         state.last_seen_at = time.time()
@@ -785,6 +802,8 @@ async def apply_session_end(state: WorkerState, token: object, message: dict[str
         if state.active_session_id == session_id:
             state.live = False
             state.frame = None
+            state.audio_packets.clear()
+            state.last_audio_at = None
             state.active_session_id = None
             state.session_started_at = None
             state.transcripts.clear()
@@ -803,6 +822,20 @@ async def apply_frame(state: WorkerState, token: object, frame: bytes) -> None:
         state.frame = frame
         state.frame_sequence += 1
         state.last_frame_at = time.time()
+
+
+async def apply_live_audio(state: WorkerState, token: object, pcm: bytes) -> None:
+    """Keep a short PCM ring buffer for viewers connected to this live worker."""
+    if not pcm or len(pcm) > MAX_LIVE_AUDIO_PACKET_BYTES or len(pcm) % 2:
+        return
+    async with state.lock:
+        if state.token is not token:
+            return
+        now = time.time()
+        state.last_seen_at = now
+        state.audio_sequence += 1
+        state.audio_packets.append((state.audio_sequence, pcm))
+        state.last_audio_at = now
 
 
 async def apply_transcript(state: WorkerState, token: object, raw_line: dict[str, Any]) -> None:
@@ -856,6 +889,16 @@ def parse_archive_recording_chunk(payload: bytes) -> tuple[dict[str, Any], bytes
     if not isinstance(metadata, dict) or metadata.get("type") != "archive_recording_chunk":
         return None
     return metadata, payload[8 + header_size:]
+
+
+def parse_live_audio(payload: bytes) -> bytes | None:
+    """Decode the compact, fixed-format live PCM publisher message."""
+    if not payload.startswith(LIVE_AUDIO_MAGIC):
+        return None
+    pcm = payload[len(LIVE_AUDIO_MAGIC):]
+    if not pcm or len(pcm) > MAX_LIVE_AUDIO_PACKET_BYTES or len(pcm) % 2:
+        return None
+    return pcm
 
 
 @app.get("/")
@@ -1044,6 +1087,53 @@ async def worker_stream(worker_name: str) -> StreamingResponse:
     return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=samcamframe", headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
+@app.websocket("/ws/live-audio/{worker_name}")
+async def stream_live_audio(websocket: WebSocket, worker_name: str) -> None:
+    """Send body-camera PCM to a public viewer over a browser WebSocket.
+
+    Each binary message is a four-byte big-endian relay sequence followed by
+    16 kHz mono s16le PCM. The sequence is useful to clients that want to
+    detect gaps, while keeping the audio payload independently decodable.
+    """
+    try:
+        require_worker_name(worker_name)
+    except ValueError:
+        await websocket.close(code=1008, reason="invalid worker name")
+        return
+    await websocket.accept()
+    sent_sequence = -1
+    last_keepalive = time.monotonic()
+    try:
+        while True:
+            state = await existing_worker(worker_name)
+            packets: list[tuple[int, bytes]] = []
+            if state is not None:
+                async with state.lock:
+                    if state.is_streaming():
+                        if sent_sequence < 0:
+                            # A viewer joining mid-stream gets just enough
+                            # history to fill its jitter buffer, never seconds
+                            # of old speech.
+                            packets = list(state.audio_packets)[-8:]
+                        else:
+                            packets = [
+                                item for item in state.audio_packets
+                                if item[0] > sent_sequence
+                            ]
+            for sequence, pcm in packets:
+                await websocket.send_bytes(sequence.to_bytes(4, "big") + pcm)
+                sent_sequence = sequence
+            now = time.monotonic()
+            if not packets and now - last_keepalive >= 10:
+                # Writes make an idle browser disconnect observable even when
+                # the camera is silent. The page ignores text keepalives.
+                await websocket.send_text("keepalive")
+                last_keepalive = now
+            await asyncio.sleep(0.04 if packets else 0.2)
+    except WebSocketDisconnect:
+        pass
+
+
 @app.websocket("/ws/worker/{worker_name}")
 async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
     try:
@@ -1061,6 +1151,8 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
         state.last_seen_at = time.time()
         state.live = False
         state.frame = None
+        state.audio_packets.clear()
+        state.last_audio_at = None
 
     try:
         while True:
@@ -1085,7 +1177,11 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
                         except (ValueError, TypeError):
                             pass
                     elif len(payload_bytes) <= MAX_FRAME_BYTES:
-                        await apply_frame(state, token, payload_bytes)
+                        parsed_audio = parse_live_audio(payload_bytes)
+                        if parsed_audio is not None:
+                            await apply_live_audio(state, token, parsed_audio)
+                        else:
+                            await apply_frame(state, token, payload_bytes)
                 continue
             raw_text = message.get("text")
             if not raw_text:
@@ -1152,6 +1248,8 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
                 session_id = state.active_session_id
                 state.live = False
                 state.frame = None
+                state.audio_packets.clear()
+                state.last_audio_at = None
                 state.last_seen_at = time.time()
                 state.token = None
         if session_id:

@@ -53,6 +53,11 @@ RECONNECT_SECONDS = 2.0
 # A faster status heartbeat starts the public relay as soon as the laptop has
 # its first camera frame. Frame publishing itself remains continuous.
 STATUS_POLL_SECONDS = 0.5
+# The native camera helper produces 16 kHz mono signed 16-bit PCM. Prefixing
+# each WebSocket payload keeps it distinct from JPEG frames and the two archive
+# message formats while preserving a low-latency, codec-free live path.
+LIVE_AUDIO_MAGIC = b"SCAU"
+LIVE_AUDIO_FRAME_BYTES = 1_600  # 50 ms at 16 kHz mono s16le
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ANALYTICS_SCHEMA_VERSION = 1
@@ -1068,6 +1073,38 @@ async def publish_frames(session: aiohttp.ClientSession, send: Any, stop: asynci
                 pass
 
 
+async def publish_audio(session: aiohttp.ClientSession, send: Any, stop: asyncio.Event) -> None:
+    """Relay only USB-camera PCM; browser playback happens on the public site.
+
+    ``/stream.pcm`` is a local, endless byte stream. Reframe it into short,
+    sample-aligned WebSocket messages so temporary network jitter cannot turn
+    into a growing multi-second audio backlog.
+    """
+    while not stop.is_set():
+        try:
+            async with session.get(
+                f"{LOCAL_URL}/stream.pcm",
+                timeout=aiohttp.ClientTimeout(total=None, sock_read=15),
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"local audio returned HTTP {response.status}")
+                buffer = bytearray()
+                async for chunk in response.content.iter_any():
+                    if stop.is_set():
+                        return
+                    buffer.extend(chunk)
+                    while len(buffer) >= LIVE_AUDIO_FRAME_BYTES:
+                        pcm = bytes(buffer[:LIVE_AUDIO_FRAME_BYTES])
+                        del buffer[:LIVE_AUDIO_FRAME_BYTES]
+                        await send(LIVE_AUDIO_MAGIC + pcm)
+        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+            print(f"  local audio: {exc}", file=sys.stderr)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=RECONNECT_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+
 async def connected_publisher(stop: asyncio.Event, archiver: SessionArchiver) -> None:
     websocket_url = relay_websocket_url()
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
@@ -1088,8 +1125,12 @@ async def connected_publisher(stop: asyncio.Event, archiver: SessionArchiver) ->
 
                     status_task = asyncio.create_task(publish_status(session, send, stop, archiver))
                     frames_task = asyncio.create_task(publish_frames(session, send, stop, archiver))
+                    audio_task = asyncio.create_task(publish_audio(session, send, stop))
                     stop_task = asyncio.create_task(stop.wait())
-                    done, pending = await asyncio.wait({status_task, frames_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                    done, pending = await asyncio.wait(
+                        {status_task, frames_task, audio_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                     for task in pending:
                         task.cancel()
                     for task in pending:

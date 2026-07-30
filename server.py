@@ -500,6 +500,15 @@ class Library:
 SOI = b"\xff\xd8\xff"          # JPEG start-of-image
 EOI = b"\xff\xd9"              # JPEG end-of-image
 DEFAULT_FPS = 25.0
+# `bodycam_capture` normalizes the camera microphone to this format before
+# handing it to us.  Keeping it raw locally avoids a second lossy encode before
+# the public viewer's Web Audio buffer receives it.
+LIVE_AUDIO_SAMPLE_RATE = 16_000
+LIVE_AUDIO_CHANNELS = 1
+LIVE_AUDIO_BYTES_PER_SAMPLE = 2
+# Feed the publisher roughly 100 ms at a time. A one-second pipe read would
+# make the Web Audio jitter buffer start an entire second behind the camera.
+LIVE_AUDIO_PUBLISH_CHUNK_BYTES = 3_200
 # The camera has to switch USB personalities before macOS can enumerate its
 # UVC interface, so no application can make that physical step instantaneous.
 # Once AVFoundation does report the device, however, fail a no-frame capture
@@ -569,6 +578,11 @@ class Streamer:
         self.fps = DEFAULT_FPS
         self.condition = threading.Condition()
         self.viewers = 0
+        self.audio_viewers = 0
+        self.audio_seq = 0
+        # Retain only a short recovery window for a slow local publisher. Live
+        # audio must drop old data rather than accumulate seconds of delay.
+        self.audio_packets: deque[tuple[int, bytes]] = deque(maxlen=80)
         self.started = False
         self.lock = threading.Lock()
         self.live = False  # true while a real UVC feed is on screen
@@ -596,6 +610,22 @@ class Streamer:
             self.seq += 1
             self.condition.notify_all()
 
+    def publish_audio(self, pcm: bytes) -> None:
+        """Fan out body-camera 16 kHz mono s16le PCM to local subscribers."""
+        if not pcm:
+            return
+        # A partial Int16 sample cannot be played by Web Audio. It is safe to
+        # discard the one trailing byte: every capture packet is sample-aligned
+        # and this only protects the fallback FFmpeg pipe.
+        if len(pcm) % LIVE_AUDIO_BYTES_PER_SAMPLE:
+            pcm = pcm[:-1]
+        if not pcm:
+            return
+        with self.condition:
+            self.audio_seq += 1
+            self.audio_packets.append((self.audio_seq, pcm))
+            self.condition.notify_all()
+
     def clear_frame(self) -> None:
         """Clear a stale image once when live capture stops."""
         with self.condition:
@@ -613,11 +643,29 @@ class Streamer:
         with self.condition:
             self.viewers = max(0, self.viewers - 1)
 
+    def add_audio_viewer(self) -> None:
+        with self.condition:
+            self.audio_viewers += 1
+
+    def remove_audio_viewer(self) -> None:
+        with self.condition:
+            self.audio_viewers = max(0, self.audio_viewers - 1)
+
     def wait_for_frame(self, last_seq: int, timeout: float = 5.0) -> tuple[bytes | None, int]:
         with self.condition:
             if self.seq == last_seq:
                 self.condition.wait(timeout)
             return self.frame, self.seq
+
+    def wait_for_audio(
+        self, last_seq: int, timeout: float = 1.0
+    ) -> tuple[list[bytes], int]:
+        """Return packets newer than ``last_seq`` without replaying stale audio."""
+        with self.condition:
+            if self.audio_seq <= last_seq:
+                self.condition.wait(timeout)
+            packets = [payload for sequence, payload in self.audio_packets if sequence > last_seq]
+            return packets, self.audio_seq
 
     def status(self) -> dict:
         return {
@@ -625,6 +673,8 @@ class Streamer:
             "fps": round(self.fps, 1),
             "frames": self.seq,
             "viewers": self.viewers,
+            "audio_viewers": self.audio_viewers,
+            "audio_packets": self.audio_seq,
             "running": self.started,
             "live": self.live,
             "live_profile": self.live_profile,
@@ -634,10 +684,19 @@ class Streamer:
 
     # -- producer --------------------------------------------------------
     def _capture_needed(self) -> bool:
+        with self.condition:
+            viewers_need_capture = self.viewers > 0 or self.audio_viewers > 0
         return not self.stopping.is_set() and (
-            self.viewers > 0 or (
+            viewers_need_capture
+            or (self.transcriber is not None and self.transcriber.is_running())
+        )
+
+    def _audio_needed(self) -> bool:
+        """Whether the one camera capture session must expose audio."""
+        with self.condition:
+            public_audio_needed = self.audio_viewers > 0
+        return public_audio_needed or (
             self.transcriber is not None and self.transcriber.is_running()
-            )
         )
 
     def _produce(self) -> None:
@@ -777,6 +836,7 @@ class Streamer:
                             frames.put_nowait(payload)
                     elif kind == ord("A"):
                         audio_bytes += len(payload)
+                        self.publish_audio(payload)
                         if (
                             self.transcriber is not None
                             and self.transcriber.is_running()
@@ -852,16 +912,19 @@ class Streamer:
         self, selector: str, input_options: tuple[str, ...]
     ) -> None:
         """Run one AVFoundation format until disconnect, stall, or viewer exit."""
-        audio_enabled = (
-            self.transcriber is not None and self.transcriber.is_running()
-        )
+        audio_enabled = self._audio_needed()
         audio_read_fd: int | None = None
         audio_write_fd: int | None = None
         audio_args: list[str] = []
         input_target = f"{selector}:none"
         if audio_enabled:
             audio_read_fd, audio_write_fd = os.pipe()
-            input_target = f"{selector}:{self.transcriber.device}"
+            audio_device = (
+                self.transcriber.device
+                if self.transcriber is not None
+                else "GENERAL - AUDIO"
+            )
+            input_target = f"{selector}:{audio_device}"
             audio_args = [
                 "-map", "0:a:0", "-vn",
                 "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
@@ -894,12 +957,19 @@ class Streamer:
             os.close(audio_write_fd)
 
         def pump_audio() -> None:
-            if audio_read_fd is None or self.transcriber is None:
+            if audio_read_fd is None:
                 return
             try:
                 with os.fdopen(audio_read_fd, "rb", buffering=0) as audio:
-                    for chunk in iter(lambda: audio.read(32_000), b""):
-                        self.transcriber.feed_audio(chunk)
+                    for chunk in iter(
+                        lambda: audio.read(LIVE_AUDIO_PUBLISH_CHUNK_BYTES), b""
+                    ):
+                        self.publish_audio(chunk)
+                        if (
+                            self.transcriber is not None
+                            and self.transcriber.is_running()
+                        ):
+                            self.transcriber.feed_audio(chunk)
             except OSError:
                 pass
 
@@ -951,11 +1021,7 @@ class Streamer:
                 # Starting or stopping transcription changes whether the one
                 # camera-owning process needs an audio output. Restart cleanly
                 # so a second AVFoundation process is never opened.
-                transcript_now = (
-                    self.transcriber is not None
-                    and self.transcriber.is_running()
-                )
-                if transcript_now != audio_enabled:
+                if self._audio_needed() != audio_enabled:
                     return
 
                 try:
@@ -1624,6 +1690,39 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.streamer.remove_viewer()
 
+    def serve_pcm(self) -> None:
+        """Continuously stream camera PCM for the outbound public publisher.
+
+        This endpoint stays local to the Mac.  It is deliberately raw 16 kHz
+        mono s16le; ``publish_worker.py`` frames it for the relay WebSocket,
+        which lets the browser use Web Audio without involving the laptop mic.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("X-SamCam-Audio-Format", "s16le")
+        self.send_header("X-SamCam-Audio-Rate", str(LIVE_AUDIO_SAMPLE_RATE))
+        self.send_header("X-SamCam-Audio-Channels", str(LIVE_AUDIO_CHANNELS))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        self.streamer.ensure_running()
+        self.streamer.add_audio_viewer()
+        # Do not replay sound from before this connection. A reconnect should
+        # always rejoin near live rather than sound like a delayed recording.
+        last_seq = self.streamer.audio_seq
+        try:
+            while True:
+                packets, sequence = self.streamer.wait_for_audio(last_seq, timeout=1.0)
+                last_seq = sequence
+                for packet in packets:
+                    self.wfile.write(packet)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.streamer.remove_audio_viewer()
+
     def clip_from_path(self, suffix: str) -> Clip | None:
         clip_id = suffix.rsplit(".", 1)[0]
         if not SAFE_ID.match(clip_id):
@@ -1674,6 +1773,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/stream.mjpg":
             self.serve_mjpeg()
+            return
+
+        if path == "/stream.pcm":
+            self.serve_pcm()
             return
 
         for prefix, attr, ctype, download in (
