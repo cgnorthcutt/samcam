@@ -74,12 +74,12 @@ class LocalRecordingChunk:
     size_bytes: int
 
 
-def archive_part_bitrate_kbps(duration_seconds: float) -> int:
-    """Choose a bounded archive bitrate that keeps one part relay-safe.
+def archive_preview_bitrate_kbps(duration_seconds: float) -> int:
+    """Choose a bounded preview bitrate that keeps one part relay-safe.
 
     The public relay deliberately caps a binary archive part below its WebSocket
-    message limit.  Without this bound, simply changing a part from ten seconds
-    to five minutes silently creates 40 MB files that are never uploaded.
+    message limit.  The local/full recording stays at normal archive quality;
+    only its public recovery preview is constrained to this limit.
     """
     seconds = max(1.0, duration_seconds)
     relay_limit_kbps = int(
@@ -232,6 +232,10 @@ class SessionArchiver:
         return session_dir / "recording.mp4"
 
     @staticmethod
+    def _preview_path(segment_path: Path) -> Path:
+        return segment_path.parent / ".previews" / segment_path.name
+
+    @staticmethod
     def _analytics_path(session_dir: Path) -> Path:
         return session_dir / "analytics.json"
 
@@ -267,15 +271,14 @@ class SessionArchiver:
             frame_rate = ARCHIVE_FPS
             if segment.frame_count:
                 frame_rate = max(1.0, min(60.0, segment.frame_count / max(0.1, segment.duration_seconds)))
-            bitrate_kbps = archive_part_bitrate_kbps(segment.duration_seconds)
             temporary.unlink(missing_ok=True)
             completed = subprocess.run(
                 [
                     ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                     "-f", "image2pipe", "-framerate", f"{frame_rate:.3f}", "-c:v", "mjpeg", "-i", str(raw_path),
                     "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                    "-b:v", f"{bitrate_kbps}k", "-maxrate", f"{bitrate_kbps}k",
-                    "-bufsize", f"{bitrate_kbps * 2}k", "-pix_fmt", "yuv420p",
+                    "-b:v", f"{ARCHIVE_VIDEO_MAX_KBPS}k", "-maxrate", f"{ARCHIVE_VIDEO_MAX_KBPS}k",
+                    "-bufsize", f"{ARCHIVE_VIDEO_MAX_KBPS * 2}k", "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart", str(temporary),
                 ],
                 capture_output=True,
@@ -284,16 +287,55 @@ class SessionArchiver:
             if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
                 detail = completed.stderr.decode(errors="replace").strip()[-500:]
                 raise RuntimeError(detail or "ffmpeg produced no MP4")
-            if temporary.stat().st_size > MAX_ARCHIVE_SEGMENT_BYTES:
-                raise RuntimeError(
-                    f"encoded archive part is {temporary.stat().st_size:,} bytes; "
-                    f"relay limit is {MAX_ARCHIVE_SEGMENT_BYTES:,}"
-                )
             temporary.replace(output)
             raw_path.unlink(missing_ok=True)
+            if output.stat().st_size > MAX_ARCHIVE_SEGMENT_BYTES:
+                self._encode_preview(output, segment.duration_seconds)
         except Exception as exc:  # noqa: BLE001 - live publishing must never stop for archive encoding
             with self.lock:
                 self.errors.append(f"archive segment {segment.sequence}: {exc}"[-600:])
+                del self.errors[:-10]
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _encode_preview(self, source: Path, duration_seconds: float) -> None:
+        """Create a relay-safe version of a long local archive part.
+
+        Full-fidelity parts are retained locally and concatenated into the
+        downloadable recording.  This small sibling is only for the public
+        in-progress/archive-part view, whose WebSocket message has a hard cap.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return
+        target = self._preview_path(source)
+        temporary = target.with_name(f"{target.stem}.part{target.suffix}")
+        bitrate_kbps = archive_preview_bitrate_kbps(duration_seconds)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.unlink(missing_ok=True)
+            completed = subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                    "-an", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-b:v", f"{bitrate_kbps}k", "-maxrate", f"{bitrate_kbps}k",
+                    "-bufsize", f"{bitrate_kbps * 2}k", "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart", str(temporary),
+                ],
+                capture_output=True,
+                timeout=300,
+            )
+            if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
+                detail = completed.stderr.decode(errors="replace").strip()[-500:]
+                raise RuntimeError(detail or "ffmpeg produced no relay-safe preview")
+            if temporary.stat().st_size > MAX_ARCHIVE_SEGMENT_BYTES:
+                raise RuntimeError(
+                    f"preview is {temporary.stat().st_size:,} bytes; relay limit is {MAX_ARCHIVE_SEGMENT_BYTES:,}"
+                )
+            temporary.replace(target)
+        except Exception as exc:  # noqa: BLE001 - a final recording is still valid without a preview
+            with self.lock:
+                self.errors.append(f"archive preview {source.name}: {exc}"[-600:])
                 del self.errors[:-10]
         finally:
             temporary.unlink(missing_ok=True)
@@ -687,12 +729,14 @@ class SessionArchiver:
                     if (session_id, sequence) in self.uploaded:
                         continue
                     details = json.loads(path.with_suffix(".json").read_text())
+                    preview = self._preview_path(path)
+                    upload_path = preview if preview.exists() and preview.stat().st_size > 0 else path
                     return LocalSegment(
                         session_id=session_id,
                         sequence=sequence,
                         started_at=float(details["started_at"]),
                         duration_seconds=float(details["duration_seconds"]),
-                        path=path,
+                        path=upload_path,
                     )
                 except (OSError, ValueError, KeyError):
                     continue
