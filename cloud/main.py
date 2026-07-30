@@ -256,8 +256,13 @@ class ArchiveStore:
             "started_at": finite_timestamp(session.get("started_at")),
             "ended_at": finite_timestamp(session["ended_at"]) if session.get("ended_at") else None,
         }
-        prior = self.memory_sessions.get(session_id)
-        self.memory_sessions[session_id] = {**(prior or {}), **record}
+        # The in-memory archive is strictly a local-development fallback.  On
+        # Render, Postgres is the durable source of truth and retaining every
+        # uploaded session here would keep duplicate video bytes in RAM until
+        # the process is killed.
+        if not self.database_required:
+            prior = self.memory_sessions.get(session_id)
+            self.memory_sessions[session_id] = {**(prior or {}), **record}
         if self.pool is None:
             return
         try:
@@ -285,7 +290,7 @@ class ArchiveStore:
     async def end_session(self, session_id: str, ended_at: float | None = None) -> None:
         session_id = require_session_id(session_id)
         ended_at = finite_timestamp(ended_at)
-        if session_id in self.memory_sessions:
+        if not self.database_required and session_id in self.memory_sessions:
             self.memory_sessions[session_id]["ended_at"] = ended_at
         if self.pool is None:
             return
@@ -314,7 +319,8 @@ class ArchiveStore:
             "size_bytes": len(data),
             "data": data,
         }
-        self.memory_segments[(session_id, sequence)] = record
+        if not self.database_required:
+            self.memory_segments[(session_id, sequence)] = record
         if self.pool is None:
             return
         try:
@@ -353,7 +359,8 @@ class ArchiveStore:
             "size_bytes": len(data),
             "data": data,
         }
-        self.memory_recording_chunks[(session_id, index)] = record
+        if not self.database_required:
+            self.memory_recording_chunks[(session_id, index)] = record
         if self.pool is None:
             return
         try:
@@ -377,16 +384,17 @@ class ArchiveStore:
         session_id = require_session_id(session_id)
         if chunk_count <= 0 or chunk_count > 100_000 or size_bytes <= 0:
             return
-        memory_parts = [
-            value for (candidate, _), value in self.memory_recording_chunks.items() if candidate == session_id
-        ]
-        if len(memory_parts) == chunk_count and sum(int(part["size_bytes"]) for part in memory_parts) == size_bytes:
-            self.memory_recordings[session_id] = {
-                "session_id": session_id,
-                "content_type": "video/mp4",
-                "chunk_count": chunk_count,
-                "size_bytes": size_bytes,
-            }
+        if not self.database_required:
+            memory_parts = [
+                value for (candidate, _), value in self.memory_recording_chunks.items() if candidate == session_id
+            ]
+            if len(memory_parts) == chunk_count and sum(int(part["size_bytes"]) for part in memory_parts) == size_bytes:
+                self.memory_recordings[session_id] = {
+                    "session_id": session_id,
+                    "content_type": "video/mp4",
+                    "chunk_count": chunk_count,
+                    "size_bytes": size_bytes,
+                }
         if self.pool is None:
             return
         try:
@@ -432,7 +440,8 @@ class ArchiveStore:
             return
         if len(serialized.encode()) > 1_000_000:
             return
-        self.memory_analytics[session_id] = payload
+        if not self.database_required:
+            self.memory_analytics[session_id] = payload
         if self.pool is None:
             return
         try:
@@ -565,7 +574,8 @@ class ArchiveStore:
             "started_at": started_at,
             "received_at": finite_timestamp(line.get("received_at")),
         }
-        self.memory_transcripts[(session_id, line_key)] = record
+        if not self.database_required:
+            self.memory_transcripts[(session_id, line_key)] = record
         if self.pool is None:
             return
         try:
@@ -606,10 +616,11 @@ class ArchiveStore:
                 "received_at": finite_timestamp(line.get("received_at")),
             })
 
-        self.memory_transcripts = {
-            key: record for key, record in self.memory_transcripts.items() if key[0] != session_id
-        }
-        self.memory_transcripts.update({(session_id, record["line_key"]): record for record in records})
+        if not self.database_required:
+            self.memory_transcripts = {
+                key: record for key, record in self.memory_transcripts.items() if key[0] != session_id
+            }
+            self.memory_transcripts.update({(session_id, record["line_key"]): record for record in records})
         if self.pool is None:
             return
         try:

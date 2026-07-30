@@ -37,6 +37,26 @@ class ArchiveResilienceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ArchiveUnavailable):
             await store.list_sessions("Curtis")
 
+    async def test_database_mode_never_retains_uploaded_video_bytes_in_memory(self) -> None:
+        store = ArchiveStore()
+        store.database_required = True
+
+        await store.save_segment({
+            "session_id": "Curtis-memory-guard-0001",
+            "sequence": 0,
+            "started_at": 1_700_000_000,
+            "duration_seconds": 1,
+        }, b"video")
+        await store.save_recording_chunk({
+            "session_id": "Curtis-memory-guard-0001",
+            "index": 0,
+            "count": 1,
+            "size_bytes": 5,
+        }, b"video")
+
+        self.assertEqual(store.memory_segments, {})
+        self.assertEqual(store.memory_recording_chunks, {})
+
     def test_public_ui_preserves_last_known_archive_list_and_retries_detail(self) -> None:
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
 
