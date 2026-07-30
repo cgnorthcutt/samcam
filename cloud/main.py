@@ -86,6 +86,11 @@ def session_duration(session: dict[str, Any]) -> float:
     return round(max(0.0, finite_timestamp(ended, time.time()) - started), 2) if ended else round(max(0.0, time.time() - started), 2)
 
 
+def missing_archive_parent(exc: Exception) -> bool:
+    """True for a harmless queued write after its archive was deleted."""
+    return getattr(exc, "sqlstate", None) == "23503"
+
+
 class ArchiveStore:
     """Postgres-backed archive with an explicit local-development fallback."""
 
@@ -103,6 +108,9 @@ class ArchiveStore:
         self.memory_recordings: dict[str, dict[str, Any]] = {}
         self.memory_transcripts: dict[tuple[str, str], dict[str, Any]] = {}
         self.memory_analytics: dict[str, dict[str, Any]] = {}
+        # A publisher retains local recovery copies.  These durable tombstones
+        # stop an explicitly deleted public session from being re-synced.
+        self.deleted_session_ids: set[str] = set()
 
     async def start(self) -> None:
         if not self.database_required:
@@ -167,12 +175,20 @@ class ArchiveStore:
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                    CREATE TABLE IF NOT EXISTS samcam_archive_deleted_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
                     CREATE INDEX IF NOT EXISTS samcam_archive_sessions_worker_idx
                         ON samcam_archive_sessions (worker_name, started_at DESC);
                     CREATE INDEX IF NOT EXISTS samcam_archive_transcripts_session_idx
                         ON samcam_archive_transcripts (session_id, started_at);
                     """
                 )
+                deleted = await connection.fetch(
+                    "SELECT session_id FROM samcam_archive_deleted_sessions"
+                )
+                self.deleted_session_ids = {str(row["session_id"]) for row in deleted}
             self.pool = candidate
             self.error = None
             # A boot-time database DNS miss must not discard what the active
@@ -249,6 +265,8 @@ class ArchiveStore:
 
     async def start_session(self, session: dict[str, Any], worker_name: str) -> None:
         session_id = require_session_id(session.get("session_id"))
+        if session_id in self.deleted_session_ids:
+            return
         record = {
             "session_id": session_id,
             "worker_name": worker_name,
@@ -289,6 +307,8 @@ class ArchiveStore:
 
     async def end_session(self, session_id: str, ended_at: float | None = None) -> None:
         session_id = require_session_id(session_id)
+        if session_id in self.deleted_session_ids:
+            return
         ended_at = finite_timestamp(ended_at)
         if not self.database_required and session_id in self.memory_sessions:
             self.memory_sessions[session_id]["ended_at"] = ended_at
@@ -307,6 +327,8 @@ class ArchiveStore:
 
     async def save_segment(self, metadata: dict[str, Any], data: bytes) -> None:
         session_id = require_session_id(metadata.get("session_id"))
+        if session_id in self.deleted_session_ids:
+            return
         sequence = int(metadata.get("sequence", -1))
         if sequence < 0 or len(data) > MAX_ARCHIVE_SEGMENT_BYTES:
             return
@@ -336,6 +358,11 @@ class ArchiveStore:
                     record["content_type"], record["data"], record["size_bytes"],
                 )
         except Exception as exc:  # noqa: BLE001
+            # A publisher can have already queued a part when a concurrent
+            # archive deletion removes its parent session. That is expected
+            # cleanup, not a database outage.
+            if missing_archive_parent(exc):
+                return
             message = f"archive segment failed: {exc}"[-300:]
             print(message, flush=True)
             await self._mark_database_unavailable(message)
@@ -343,6 +370,8 @@ class ArchiveStore:
     async def save_recording_chunk(self, metadata: dict[str, Any], data: bytes) -> None:
         """Save one byte range of a finished, stitched MP4 recording."""
         session_id = require_session_id(metadata.get("session_id"))
+        if session_id in self.deleted_session_ids:
+            return
         index = int(metadata.get("index", -1))
         count = int(metadata.get("count", 0))
         total_size = int(metadata.get("size_bytes", 0))
@@ -376,12 +405,16 @@ class ArchiveStore:
                     session_id, index, data, len(data),
                 )
         except Exception as exc:  # noqa: BLE001
+            if missing_archive_parent(exc):
+                return
             message = f"archive recording chunk failed: {exc}"[-300:]
             print(message, flush=True)
             await self._mark_database_unavailable(message)
 
     async def complete_recording(self, session_id: str, chunk_count: int, size_bytes: int) -> None:
         session_id = require_session_id(session_id)
+        if session_id in self.deleted_session_ids:
+            return
         if chunk_count <= 0 or chunk_count > 100_000 or size_bytes <= 0:
             return
         if not self.database_required:
@@ -430,6 +463,8 @@ class ArchiveStore:
     async def save_analytics(self, session_id: str, payload: dict[str, Any]) -> None:
         """Store video-derived per-session analytics sent by the local publisher."""
         session_id = require_session_id(session_id)
+        if session_id in self.deleted_session_ids:
+            return
         samples = payload.get("samples")
         clip = payload.get("clip")
         if not isinstance(samples, list) or not samples or len(samples) > 500 or not isinstance(clip, dict):
@@ -496,6 +531,7 @@ class ArchiveStore:
     async def delete_session(self, session_id: str) -> None:
         """Permanently remove one archived session and all of its artifacts."""
         session_id = require_session_id(session_id)
+        self.deleted_session_ids.add(session_id)
         self.memory_sessions.pop(session_id, None)
         self.memory_recordings.pop(session_id, None)
         self.memory_analytics.pop(session_id, None)
@@ -512,7 +548,16 @@ class ArchiveStore:
             return
         try:
             async with self.pool.acquire() as connection:
-                await connection.execute("DELETE FROM samcam_archive_sessions WHERE session_id = $1", session_id)
+                async with connection.transaction():
+                    await connection.execute(
+                        """
+                        INSERT INTO samcam_archive_deleted_sessions (session_id)
+                        VALUES ($1)
+                        ON CONFLICT (session_id) DO NOTHING
+                        """,
+                        session_id,
+                    )
+                    await connection.execute("DELETE FROM samcam_archive_sessions WHERE session_id = $1", session_id)
         except Exception as exc:  # noqa: BLE001
             self.error = f"archive deletion failed: {exc}"[-300:]
             print(self.error, flush=True)
@@ -562,6 +607,8 @@ class ArchiveStore:
 
     async def save_transcript(self, session_id: str, line: dict[str, Any]) -> None:
         session_id = require_session_id(session_id)
+        if session_id in self.deleted_session_ids:
+            return
         text = " ".join(str(line.get("text", "")).split())[:1_000]
         if not text:
             return
@@ -597,6 +644,8 @@ class ArchiveStore:
     async def replace_transcript(self, session_id: str, lines: list[dict[str, Any]]) -> None:
         """Synchronize one archived session from the publisher's local source of truth."""
         session_id = require_session_id(session_id)
+        if session_id in self.deleted_session_ids:
+            return
         records: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
         for line in lines[:1_000]:
