@@ -122,8 +122,11 @@ let worker = new URLSearchParams(location.search).get('worker') || 'Curtis';
 let imageGeneration = 0, liveState = {streaming:false}, lastTranscriptFingerprint = '', selectedSession = null, activeArchivePart = null, activeArchiveParts = [], archiveRecordingReady = null, archiveDetailLoadingSession = null, archiveDetails = new Map(), archiveDetailRetryTimer = 0, archivePlayback = null, archivePlayerIndex = 0, archiveHandoffKey = null, archiveHandoffGeneration = 0, archiveSessions = null, archiveRefreshInFlight = false, archiveRefreshRequest = 0, feedReady = false, lastVerifiedLiveAt = 0, offlineCandidateAt = 0;
 let liveAudioSocket = null, audioContext = null, audioSessionId = null, audioEnabled = false, audioNextTime = 0, audioReconnectTimer = 0, audioSources = new Set(), audioHighPass = null, audioLowPass = null, audioLimiter = null, audioMasterGain = null, audioFeedbackAnalyser = null, audioFeedbackNotch = null, audioFeedbackHarmonic = null, audioPresence = null, audioFeedbackTimer = 0, audioLastSequence = -1, audioToneCandidateHz = 0, audioToneCandidateTicks = 0, audioToneHoldUntil = 0;
 // These values deliberately trade a little latency for smooth, low-risk live
-// speech. The body camera delivers 16 kHz mono PCM, so content above 3.2 kHz
-// cannot improve intelligibility and is where the worst speaker feedback sits.
+// speech. The 3.2 kHz cap keeps core voice intelligibility while attenuating
+// much of the high-frequency whistle that becomes painful in open-air playback.
+// This is browser-side playback protection only: it cannot remove physical
+// acoustic feedback already re-recorded by the body-camera microphone. Use
+// headphones or keep the capture device away from speakers to break that loop.
 const LIVE_AUDIO_RATE = 16000, LIVE_AUDIO_JITTER_SECONDS = .42, LIVE_AUDIO_MAX_LEAD_SECONDS = 1.5, LIVE_AUDIO_SPEAKER_GAIN = .045, LIVE_AUDIO_TONE_GAIN = .025, LIVE_AUDIO_CROSSFADE_SECONDS = .006, LIVE_AUDIO_TONE_MIN_HZ = 650, LIVE_AUDIO_TONE_MAX_HZ = 3000, LIVE_AUDIO_TONE_STABILITY_HZ = 70;
 $('worker').value = worker;
 
