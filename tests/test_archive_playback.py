@@ -63,6 +63,14 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reconnecting full recording", page)
         self.assertIn("retryArchiveDetail(detail.session_id)", page)
 
+    def test_public_ui_marks_only_device_tagged_archives_as_glasses_captures(self) -> None:
+        page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
+
+        self.assertIn('id="archiveDevice"', page)
+        self.assertIn("function renderArchiveDevice(detail)", page)
+        self.assertIn("Captured with ${device}", page)
+        self.assertIn("detail.capture_device", page)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

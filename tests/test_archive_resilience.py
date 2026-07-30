@@ -119,6 +119,25 @@ class ArchiveResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(store.pool, pool)
         self.assertIsNone(store.error)
 
+    async def test_capture_device_survives_archive_session_round_trip(self) -> None:
+        store = ArchiveStore()
+        await store.start_session(
+            {
+                "session_id": "Curtis-demo-device-0001",
+                "started_at": 1_700_000_000,
+                "ended_at": 1_700_000_030,
+                "source": "Demo · Field walkthrough",
+                "capture_device": "Meta Oakley Vanguard AI Glasses",
+            },
+            "Curtis",
+        )
+
+        detail = await store.session_detail("Curtis-demo-device-0001")
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["capture_device"], "Meta Oakley Vanguard AI Glasses")
+
     def test_public_ui_preserves_last_known_archive_list_and_retries_detail(self) -> None:
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
 

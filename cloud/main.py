@@ -133,10 +133,13 @@ class ArchiveStore:
                         session_id TEXT PRIMARY KEY,
                         worker_name TEXT NOT NULL,
                         source TEXT,
+                        capture_device TEXT,
                         started_at DOUBLE PRECISION NOT NULL,
                         ended_at DOUBLE PRECISION,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                    ALTER TABLE samcam_archive_sessions
+                        ADD COLUMN IF NOT EXISTS capture_device TEXT;
                     CREATE TABLE IF NOT EXISTS samcam_archive_segments (
                         session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
                         sequence INTEGER NOT NULL,
@@ -271,6 +274,7 @@ class ArchiveStore:
             "session_id": session_id,
             "worker_name": worker_name,
             "source": str(session.get("source") or "")[:160] or None,
+            "capture_device": str(session.get("capture_device") or "")[:160] or None,
             "started_at": finite_timestamp(session.get("started_at")),
             "ended_at": finite_timestamp(session["ended_at"]) if session.get("ended_at") else None,
         }
@@ -287,18 +291,21 @@ class ArchiveStore:
             async with self.pool.acquire() as connection:
                 await connection.execute(
                     """
-                    INSERT INTO samcam_archive_sessions (session_id, worker_name, source, started_at, ended_at)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO samcam_archive_sessions
+                      (session_id, worker_name, source, capture_device, started_at, ended_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (session_id) DO UPDATE SET
                       worker_name = EXCLUDED.worker_name,
                       source = COALESCE(EXCLUDED.source, samcam_archive_sessions.source),
+                      capture_device = COALESCE(EXCLUDED.capture_device, samcam_archive_sessions.capture_device),
                       started_at = LEAST(EXCLUDED.started_at, samcam_archive_sessions.started_at),
                       -- A new session_start has no end time and resumes an
                       -- active stream after a relay restart. Archived-session
                       -- sync carries an end time and keeps it finalized.
                       ended_at = EXCLUDED.ended_at
                     """,
-                    record["session_id"], record["worker_name"], record["source"], record["started_at"], record["ended_at"],
+                    record["session_id"], record["worker_name"], record["source"], record["capture_device"],
+                    record["started_at"], record["ended_at"],
                 )
         except Exception as exc:  # noqa: BLE001
             message = f"archive write failed: {exc}"[-300:]
@@ -737,7 +744,7 @@ class ArchiveStore:
             async with self.pool.acquire() as connection:
                 rows = await connection.fetch(
                     """
-                    SELECT s.session_id, s.worker_name, s.source, s.started_at, s.ended_at,
+                    SELECT s.session_id, s.worker_name, s.source, s.capture_device, s.started_at, s.ended_at,
                       COALESCE((SELECT COUNT(*) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS segment_count,
                       COALESCE((SELECT SUM(g.size_bytes) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS size_bytes,
                       EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
@@ -790,7 +797,7 @@ class ArchiveStore:
             async with self.pool.acquire() as connection:
                 session = await connection.fetchrow(
                     """
-                    SELECT s.session_id, s.worker_name, s.source, s.started_at, s.ended_at,
+                    SELECT s.session_id, s.worker_name, s.source, s.capture_device, s.started_at, s.ended_at,
                       EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
                       COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
                       EXISTS(SELECT 1 FROM samcam_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready
@@ -964,6 +971,7 @@ async def apply_session_start(state: WorkerState, token: object, message: dict[s
         return
     started_at = finite_timestamp(raw_session.get("started_at"))
     source = str(raw_session.get("source") or "")[:160] or None
+    capture_device = str(raw_session.get("capture_device") or "")[:160] or None
     async with state.lock:
         if state.token is not token:
             return
@@ -976,7 +984,15 @@ async def apply_session_start(state: WorkerState, token: object, message: dict[s
         if source:
             state.source = source
         state.last_seen_at = time.time()
-    await archive.start_session({"session_id": session_id, "started_at": started_at, "source": source}, state.name)
+    await archive.start_session(
+        {
+            "session_id": session_id,
+            "started_at": started_at,
+            "source": source,
+            "capture_device": capture_device,
+        },
+        state.name,
+    )
 
 
 async def apply_session_end(state: WorkerState, token: object, message: dict[str, Any]) -> None:
