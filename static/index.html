@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sam Cam</title>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #14181d;
+    --panel-2: #1a1f26;
+    --line: #262d36;
+    --text: #e6eaef;
+    --muted: #8b95a3;
+    --accent: #ff4d4d;
+    --ok: #3ddc84;
+    --warn: #ffb020;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 650; letter-spacing: .02em; display: flex; align-items: center; gap: 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(61,220,132,.15); }
+  .dot.off { background: var(--accent); box-shadow: 0 0 0 3px rgba(255,77,77,.15); }
+  .meta { color: var(--muted); font-size: 12.5px; display: flex; gap: 16px; flex-wrap: wrap; margin-right: auto; }
+  .meta b { color: var(--text); font-weight: 600; }
+
+  .tabs { display: flex; gap: 2px; background: var(--panel-2); padding: 3px; border-radius: 8px; border: 1px solid var(--line); }
+  .tabs button { border: 0; background: transparent; padding: 5px 14px; border-radius: 6px; color: var(--muted); }
+  .tabs button.on { background: #2a3542; color: var(--text); }
+
+  button {
+    font: inherit; font-size: 13px;
+    color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #222933; }
+  button:disabled { opacity: .45; cursor: default; }
+
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 20px; padding: 20px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  main.live { grid-template-columns: 1fr; }
+  main.analytics-view { display: block; }
+
+  .list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .list h2 {
+    margin: 0; padding: 11px 14px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .clips { max-height: calc(100vh - 190px); overflow-y: auto; }
+  .clip {
+    display: grid; grid-template-columns: 72px 1fr; gap: 11px;
+    padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--line);
+    align-items: center; width: 100%; text-align: left; color: inherit;
+    background: transparent; border-radius: 0; font: inherit;
+  }
+  .clip:last-child { border-bottom: 0; }
+  .clip:hover { background: var(--panel-2); }
+  .clip.active { background: #1d2733; box-shadow: inset 3px 0 0 var(--accent); }
+  .clip img, .clip .noimg {
+    width: 72px; height: 41px; object-fit: cover; border-radius: 4px;
+    background: #000; border: 1px solid var(--line); display: block;
+  }
+  .clip .name { font-weight: 600; font-size: 13px; }
+  .clip .sub { color: var(--muted); font-size: 11.5px; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.working { color: var(--warn); border-color: #4a3a18; }
+  .badge.error { color: var(--accent); border-color: #4a1f1f; }
+
+  .stage { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .live-stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(290px, 34%);
+    grid-template-areas:
+      "video transcript";
+  }
+  .live-stage .streamwrap { grid-area: video; }
+  .live-stage .transcript { grid-area: transcript; }
+  video {
+    width: 100%; display: block; background: #000; aspect-ratio: 16/9;
+    /* Cap the height so the controls below stay on screen, especially in the
+       full-width live view where 16:9 of the whole window overflows. */
+    max-height: calc(100vh - 230px); object-fit: contain;
+  }
+  .stage-bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 11px 14px; border-top: 1px solid var(--line);
+  }
+  .stage-title { font-weight: 600; margin-right: auto; }
+  .stage-title span { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+  label.toggle { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  .empty { padding: 48px 24px; text-align: center; color: var(--muted); }
+  .empty h3 { color: var(--text); margin: 0 0 8px; font-size: 15px; }
+  .hidden { display: none !important; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  .analytics {
+    margin: 0; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  .analytics-head {
+    display: flex; align-items: end; gap: 16px; flex-wrap: wrap;
+    padding: 15px 16px; border-bottom: 1px solid var(--line);
+  }
+  .analytics-title { margin-right: auto; }
+  .analytics-title h2 { margin: 0; font-size: 15px; }
+  .analytics-title p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+  .analytics-field { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+  .analytics-field select {
+    min-width: 220px; max-width: 360px; padding: 6px 30px 6px 9px;
+    color: var(--text); background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 7px; font: inherit;
+  }
+  .estimate-badge {
+    align-self: center; padding: 2px 7px; border-radius: 999px;
+    color: var(--warn); border: 1px solid #4a3a18; font-size: 10px;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .analytics-loading { padding: 36px 16px; text-align: center; color: var(--muted); }
+  .analytics-body { padding: 16px; display: grid; gap: 18px; }
+  .assumption-controls {
+    display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr));
+    gap: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line);
+  }
+  .assumption-controls label {
+    display: grid; grid-template-columns: 1fr auto; gap: 5px 10px;
+    color: var(--muted); font-size: 11px;
+  }
+  .assumption-controls output { color: var(--text); font-variant-numeric: tabular-nums; }
+  .assumption-controls input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+  .assumption-controls select {
+    grid-column: 1 / -1; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font: inherit;
+  }
+  .metrics {
+    display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr));
+    gap: 10px;
+  }
+  .metric { padding: 11px 12px; background: var(--panel-2); border-radius: 8px; }
+  .metric-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
+  .metric-value { margin-top: 3px; font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .metric-sub { color: var(--muted); font-size: 11px; }
+  .analytics-charts { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 16px; }
+  .chart-block { min-width: 0; }
+  .chart-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .chart-head h3 { margin: 0; font-size: 13px; }
+  .chart-head span { color: var(--muted); font-size: 11px; }
+  .chart { width: 100%; min-height: 250px; }
+  .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart .grid { stroke: var(--line); stroke-width: 1; }
+  .chart .axis-label { fill: var(--muted); font-size: 10px; }
+  .chart .battery-line { fill: none; stroke: var(--ok); stroke-width: 2.2; }
+  .chart .battery-line { stroke-dasharray: 5 4; }
+  .chart .motion-line { fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 2 3; }
+  .chart .lighting-line { fill: none; stroke: #7aa7ff; stroke-width: 1.8; }
+  .chart .pareto-line { fill: none; stroke: var(--warn); stroke-width: 2; }
+  .chart .pareto-point { fill: var(--warn); }
+  .chart .sample-point { fill: var(--muted); opacity: .55; }
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .legend-key::before {
+    content: ""; display: inline-block; width: 14px; height: 2px;
+    margin: 0 6px 3px 0; background: currentColor;
+  }
+  .legend-key.battery { color: var(--ok); }
+  .legend-key.motion { color: var(--accent); }
+  .legend-key.lighting { color: #7aa7ff; }
+  .legend-key.frontier { color: var(--warn); }
+  .market-fit { border-top: 1px solid var(--line); padding-top: 15px; }
+  .market-fit h3 { margin: 0 0 8px; font-size: 13px; }
+  .fit-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .fit-table th, .fit-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  .fit-table th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .fit-score { display: flex; align-items: center; gap: 8px; min-width: 110px; }
+  .fit-bar { width: 76px; height: 5px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .fit-bar span { display: block; height: 100%; background: var(--ok); }
+  .analytics-foot {
+    color: var(--muted); font-size: 11px; padding-top: 2px;
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .analytics-foot b { color: var(--text); font-weight: 600; }
+
+  /* The wrapper owns the aspect ratio, not the image, so the frame keeps its
+     shape while waiting with no image to show. */
+  .streamwrap {
+    position: relative; background: #000;
+    aspect-ratio: 16/9; max-height: calc(100vh - 230px);
+  }
+  .streamwrap img {
+    width: 100%; height: 100%; display: block;
+    object-fit: contain; background: #000;
+  }
+  .livebadge {
+    position: absolute; top: 12px; left: 12px;
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(10,12,15,.72); backdrop-filter: blur(6px);
+    border: 1px solid #3a2020; color: #ff8080;
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: .1em;
+  }
+  .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  .streamidle {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    text-align: center; padding: 20px;
+    color: var(--muted); font-size: 14px; line-height: 1.7;
+  }
+  .streamidle b { color: var(--text); }
+  .streamidle .sub { font-size: 12px; margin-top: 6px; opacity: .7; }
+  .transcript {
+    display: flex; flex-direction: column; min-width: 0;
+    border-left: 1px solid var(--line);
+    background: #11151a;
+  }
+  .transcript-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--muted);
+  }
+  .transcript-head b { color: var(--text); margin-right: auto; }
+  .transcript-text {
+    flex: 1; min-height: 0; max-height: calc(100vh - 155px); overflow-y: auto;
+    padding: 12px 14px; font-size: 16px; line-height: 1.55;
+  }
+  .transcript-line + .transcript-line { margin-top: 8px; }
+  .transcript-time {
+    color: var(--muted); font-size: 11px; margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .transcript-placeholder { color: var(--muted); font-size: 13px; }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse { animation: none; }
+  }
+  @media (max-width: 1050px) {
+    .metrics { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+    .analytics-charts { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 700px) {
+    .live-stage {
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        "video"
+        "transcript";
+    }
+    .transcript { border-left: 0; border-top: 1px solid var(--line); }
+    .transcript-text { min-height: 110px; max-height: 220px; }
+    .analytics-field, .analytics-field select { width: 100%; min-width: 0; max-width: none; }
+    .assumption-controls { grid-template-columns: 1fr; }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .analytics-charts { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span id="dot" class="dot"></span> Sam Cam</div>
+  <div class="meta" id="meta"></div>
+  <div class="tabs" role="tablist" aria-label="Sam Cam views">
+    <button id="tabStream" class="on" role="tab" aria-selected="true" aria-controls="streamView">Stream</button>
+    <button id="tabArchive" role="tab" aria-selected="false" aria-controls="archiveView">Archive</button>
+    <button id="tabAnalytics" role="tab" aria-selected="false" aria-controls="analyticsView">Analytics</button>
+  </div>
+</header>
+
+<!-- STREAM -->
+<main id="streamView" class="live">
+  <section class="stage live-stage">
+    <div class="streamwrap">
+      <img id="streamImg" alt="">
+      <div class="livebadge hidden" id="liveBadge"><span class="pulse"></span> STREAMING</div>
+      <div class="streamidle" id="streamIdle">Checking camera&hellip;</div>
+    </div>
+    <div class="transcript">
+      <div class="transcript-head">
+        <b>Live transcript</b>
+        <span id="transcriptStatus">Starting local Whisper&hellip;</span>
+      </div>
+      <div class="transcript-text" id="transcriptText" role="log" aria-live="polite" aria-relevant="additions text">
+        <div class="transcript-placeholder">Transcript will appear when Sam Cam is live.</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ARCHIVE -->
+<main id="archiveView" class="hidden">
+  <section class="list">
+    <h2>Clips <span id="count"></span></h2>
+    <div class="clips" id="clips"></div>
+  </section>
+
+  <section class="stage">
+    <video id="player" controls playsinline></video>
+    <div class="stage-bar">
+      <div class="stage-title" id="stageTitle">No clip selected</div>
+      <label class="toggle"><input type="checkbox" id="tail" checked> Auto-play newest</label>
+      <button id="dlMp4" disabled>Download MP4</button>
+      <button id="dlRaw" disabled>Original AVI</button>
+    </div>
+  </section>
+</main>
+
+<main id="analyticsView" class="analytics-view hidden">
+<section class="analytics" aria-labelledby="analyticsTitle">
+  <div class="analytics-head">
+    <div class="analytics-title">
+      <h2 id="analyticsTitle">Customer fit analytics</h2>
+      <p>Use-case suitability estimates from per-video signals and device specifications</p>
+    </div>
+    <label class="analytics-field" for="analyticsClip">
+      Video
+      <select id="analyticsClip" disabled>
+        <option>Waiting for clips…</option>
+      </select>
+    </label>
+    <span class="estimate-badge">Measured + estimated</span>
+  </div>
+
+  <div class="analytics-loading" id="analyticsLoading" role="status">Choose a ready video to analyze.</div>
+  <div class="analytics-body hidden" id="analyticsBody">
+    <div class="assumption-controls">
+      <label for="startCharge">
+        Starting battery <output id="startChargeValue" for="startCharge">100%</output>
+        <input id="startCharge" type="range" min="10" max="100" value="100" step="5">
+      </label>
+      <label for="mountDistance">
+        Mount distance from neck <output id="mountDistanceValue" for="mountDistance">15 cm</output>
+        <input id="mountDistance" type="range" min="5" max="30" value="15" step="1">
+      </label>
+      <label for="targetSession">
+        Target session
+        <select id="targetSession">
+          <option value="60">1 hour · field visit</option>
+          <option value="240" selected>4 hours · extended use</option>
+          <option value="480">8 hours · full shift</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="metrics" aria-label="Selected video product metrics">
+      <div class="metric">
+        <div class="metric-label">Estimated charge after video</div>
+        <div class="metric-value" id="metricBattery">—</div>
+        <div class="metric-sub" id="metricBatterySub"></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Estimated runtime remaining</div>
+        <div class="metric-value" id="metricEta">—</div>
+        <div class="metric-sub" id="metricEtaSub">800 mAh · estimated</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Listed device weight</div>
+        <div class="metric-value" id="metricWeight">—</div>
+        <div class="metric-sub">body camera + built-in battery</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Estimated static moment</div>
+        <div class="metric-value" id="metricLoad">—</div>
+        <div class="metric-sub" id="metricTorque"></div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Use-case suitability</div>
+        <div class="metric-value" id="metricFit">—</div>
+        <div class="metric-sub" id="metricFitSub"></div>
+      </div>
+    </div>
+
+    <div class="analytics-charts">
+      <section class="chart-block" aria-labelledby="timelineTitle">
+        <div class="chart-head">
+          <h3 id="timelineTitle">Operating profile across the video</h3>
+          <span>All series normalized to 0–100</span>
+        </div>
+        <div class="chart" id="timelineChart"></div>
+        <div class="chart-legend">
+          <span class="legend-key battery">Battery estimate</span>
+          <span class="legend-key motion">Video-derived motion</span>
+          <span class="legend-key lighting">Video-derived lighting</span>
+        </div>
+      </section>
+      <section class="chart-block" aria-labelledby="paretoTitle">
+        <div class="chart-head">
+          <h3 id="paretoTitle">Operating-state Pareto frontier</h3>
+          <span>Non-dominated comfort × capture moments</span>
+        </div>
+        <div class="chart" id="paretoChart"></div>
+        <div class="chart-legend">
+          <span class="legend-key frontier">Non-dominated frontier</span>
+        </div>
+      </section>
+    </div>
+
+    <section class="market-fit" aria-labelledby="segmentsTitle">
+      <h3 id="segmentsTitle">Customer segment fit</h3>
+      <div style="overflow-x:auto">
+        <table class="fit-table">
+          <caption class="sr-only">Estimated suitability by customer segment</caption>
+          <thead>
+            <tr><th>Segment</th><th>Overall</th><th>Battery fit</th><th>Comfort</th><th>Capture</th><th>Readout</th></tr>
+          </thead>
+          <tbody id="fitRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="analytics-foot">
+      <span><b>Video-derived:</b> duration, sampled luminance, frame-to-frame motion.</span>
+      <span><b>Scenario model:</b> battery, ETA, static mount moment, wearability proxy, use-case suitability.</span>
+      <span id="analyticsSampleInfo"></span>
+    </div>
+  </div>
+</section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const player = $('player'), clipsEl = $('clips');
+let clips = [], activeId = null, newestKnown = null, firstLoad = true;
+let liveModeKnown = false, liveModeActive = false;
+let cameraUiState = 'disconnected';
+let analyticsId = null, analyticsData = null, analyticsRequest = 0;
+const analyticsCache = new Map();
+
+const fmtSize = (b) => b >= 1e9 ? (b/1e9).toFixed(1)+' GB' : b >= 1e6 ? (b/1e6).toFixed(0)+' MB' : (b/1e3).toFixed(0)+' KB';
+const fmtDur = (s) => s == null ? '' : `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+const fmtTime = (t) => new Date(t*1000).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+const clamp = (value, low = 0, high = 100) => Math.max(low, Math.min(high, value));
+const average = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+const fmtEta = (minutes) => {
+  const total = Math.max(0, Math.round(minutes));
+  return `${Math.floor(total / 60)}h ${String(total % 60).padStart(2, '0')}m`;
+};
+
+/* ---------- tabs ---------- */
+function showTab(which) {
+  for (const [name, view, tab] of [
+    ['stream', 'streamView', 'tabStream'],
+    ['archive', 'archiveView', 'tabArchive'],
+    ['analytics', 'analyticsView', 'tabAnalytics'],
+  ]) {
+    $(view).classList.toggle('hidden', which !== name);
+    $(tab).classList.toggle('on', which === name);
+    $(tab).setAttribute('aria-selected', String(which === name));
+  }
+  if (which !== 'archive') player.pause();
+  if (which === 'archive') pollClips();
+}
+$('tabStream').onclick = () => showTab('stream');
+$('tabArchive').onclick = () => showTab('archive');
+$('tabAnalytics').onclick = () => showTab('analytics');
+
+/* ---------- continuous stream ---------- */
+let streaming = false;
+let reconnectTimer = null;
+
+function startServerStream() {
+  $('streamImg').src = `/stream.mjpg?t=${Date.now()}`;
+  $('streamImg').classList.remove('hidden');
+}
+
+function startStream() {
+  streaming = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  // Cache-bust so reconnecting actually reopens the multipart response.
+  startServerStream();
+  showCameraIdleState();
+}
+
+function showCameraIdleState() {
+  $('streamImg').classList.add('hidden');
+  $('streamIdle').classList.remove('hidden');
+  $('liveBadge').classList.add('hidden');
+
+  if (cameraUiState === 'storage') {
+    $('streamIdle').innerHTML =
+      '<div><b>Press Record to go live</b><div class="sub">Sam Cam is plugged in and currently in storage mode.</div></div>';
+  } else if (cameraUiState === 'live') {
+    $('streamIdle').innerHTML =
+      '<div><b>Starting live camera…</b><div class="sub">Sam Cam switched to live USB mode.</div></div>';
+  } else {
+    $('streamIdle').innerHTML =
+      '<div><b>Connect camera</b><div class="sub">Plug in Sam Cam over USB to begin.</div></div>';
+  }
+}
+
+$('streamImg').onerror = () => {
+  if (!streaming || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (streaming) startStream();
+  }, 1500);
+};
+
+async function pollStream() {
+  if (!streaming) { $('liveBadge').classList.add('hidden'); return; }
+  let s;
+  try { s = await fetch('/api/stream').then(r => r.json()); } catch { return; }
+
+  const liveFrameFresh = s.last_live_frame_at &&
+    (Date.now() / 1000 - s.last_live_frame_at) < 5;
+  if (!s.live || !liveFrameFresh) {
+    showCameraIdleState();
+    return;
+  }
+
+  $('streamImg').classList.remove('hidden');
+  $('streamIdle').classList.add('hidden');
+  $('liveBadge').classList.remove('hidden');
+}
+
+/* ---------- live local transcription ---------- */
+const transcriptClock = (seconds) => {
+  const value = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+};
+
+async function pollTranscript() {
+  let data;
+  try { data = await fetch('/api/transcript').then(r => r.json()); }
+  catch { $('transcriptStatus').textContent = 'server unavailable'; return; }
+
+  const label = data.model?.split('/').pop() || 'Whisper';
+  if (cameraUiState !== 'live') {
+    $('transcriptStatus').textContent =
+      cameraUiState === 'storage' ? 'Waiting for Record' : 'Waiting for camera';
+  } else {
+    const audioSeconds = Number(data.audio_seconds || 0);
+    $('transcriptStatus').textContent = data.error
+      ? `Error: ${data.error}`
+      : data.state === 'starting' ? `Loading ${label}…`
+      : audioSeconds < 0.25 ? 'Waiting for camera audio'
+      : data.state === 'capturing' ? `Listening · ${audioSeconds.toFixed(1)}s received`
+      : data.state === 'running' ? `Live · ${label}`
+      : data.state;
+  }
+
+  const target = $('transcriptText');
+  const lines = (data.lines || []).slice(-30);
+  target.replaceChildren();
+  if (!lines.length) {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'transcript-placeholder';
+    if (data.error) {
+      placeholder.textContent = data.error;
+    } else if (cameraUiState !== 'live') {
+      placeholder.textContent = 'Transcript will appear when Sam Cam is live.';
+    } else if (Number(data.audio_seconds || 0) < 0.25) {
+      placeholder.textContent = 'No camera audio has arrived yet.';
+    } else if (data.silence_events) {
+      const level = data.last_rms_db == null ? '' : ` · last level ${data.last_rms_db} dB`;
+      placeholder.textContent = `Camera audio detected, but no speech recognized yet${level}.`;
+    } else {
+      placeholder.textContent =
+        `Camera audio detected. Speak for about ${data.chunk_seconds || 3} seconds…`;
+    }
+    target.appendChild(placeholder);
+    return;
+  }
+  for (const line of lines) {
+    const row = document.createElement('div');
+    row.className = 'transcript-line';
+    const stamp = document.createElement('span');
+    stamp.className = 'transcript-time';
+    stamp.textContent = transcriptClock(line.started);
+    row.append(stamp, document.createTextNode(line.text));
+    target.appendChild(row);
+  }
+  target.scrollTop = target.scrollHeight;
+}
+
+/* ---------- polling ---------- */
+async function pollStatus() {
+  try {
+    const status = await fetch('/api/status').then(r => r.json());
+    renderStatus(status);
+  } catch {
+    $('dot').className = 'dot off';
+    $('meta').innerHTML = '<span>server unreachable</span>';
+  }
+}
+
+function renderStatus(s) {
+  // A short hardware Record/ON-OFF press changes the camera from mounted
+  // storage into GENERAL - UVC. Treat that transition as the user's intent to
+  // watch live: switch tabs and reopen the MJPEG connection automatically.
+  if (liveModeKnown && !liveModeActive && s.live_available) {
+    showTab('stream');
+    startStream();
+  }
+  liveModeKnown = true;
+  liveModeActive = !!s.live_available;
+
+  const usbStorage = s.connected || s.usb?.mode === 'mass-storage';
+  cameraUiState = s.live_available ? 'live' : usbStorage ? 'storage' : 'disconnected';
+  const cameraPresent = cameraUiState !== 'disconnected';
+  $('dot').className = 'dot ' + (cameraPresent ? 'on' : 'off');
+
+  const parts = [];
+  if (s.live_available) {
+    parts.push('<span><b>Sam Cam</b> live over USB</span>');
+  } else if (usbStorage) {
+    parts.push('<span><b>Sam Cam</b> connected &middot; storage mode</span>');
+    if (s.storage?.total) {
+      const pct = Math.round(100 * s.storage.used / s.storage.total);
+      parts.push(`<span>${fmtSize(s.storage.used)} of ${fmtSize(s.storage.total)} (${pct}%)</span>`);
+    }
+    if (s.working_count) parts.push(`<span style="color:var(--warn)">transcoding ${s.working_count}&hellip;</span>`);
+  } else {
+    parts.push('<span>camera not mounted &mdash; connect it over USB</span>');
+  }
+  $('meta').innerHTML = parts.join('');
+  if (streaming && !$('streamIdle').classList.contains('hidden')) {
+    showCameraIdleState();
+  }
+}
+
+/* ---------- per-video product analytics ---------- */
+function syncAnalyticsOptions(list) {
+  const selectEl = $('analyticsClip');
+  const ready = list.filter(c => c.state === 'ready');
+  const nextId = ready.some(c => c.id === analyticsId)
+    ? analyticsId
+    : ready[0]?.id || null;
+
+  selectEl.replaceChildren();
+  if (!ready.length) {
+    const option = document.createElement('option');
+    option.textContent = 'No ready videos';
+    selectEl.appendChild(option);
+    selectEl.disabled = true;
+    analyticsId = null;
+    analyticsData = null;
+    $('analyticsBody').classList.add('hidden');
+    $('analyticsLoading').classList.remove('hidden');
+    $('analyticsLoading').textContent = 'Choose a ready video to analyze.';
+    return;
+  }
+
+  for (const clip of ready) {
+    const option = document.createElement('option');
+    option.value = clip.id;
+    option.textContent = `${clip.name} · ${fmtDur(clip.duration)}`;
+    selectEl.appendChild(option);
+  }
+  selectEl.disabled = false;
+  selectEl.value = nextId;
+  if (nextId !== analyticsId || !analyticsData) loadAnalytics(nextId);
+}
+
+async function loadAnalytics(id) {
+  if (!id) return;
+  analyticsId = id;
+  $('analyticsClip').value = id;
+  const request = ++analyticsRequest;
+  $('analyticsBody').classList.add('hidden');
+  $('analyticsLoading').classList.remove('hidden');
+  $('analyticsLoading').textContent = 'Analyzing motion, lighting, battery, and ergonomic tradeoffs…';
+
+  try {
+    let data = analyticsCache.get(id);
+    if (!data) {
+      const response = await fetch(`/api/analytics/${encodeURIComponent(id)}`);
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'analysis failed');
+      analyticsCache.set(id, data);
+    }
+    if (request !== analyticsRequest) return;
+    analyticsData = data;
+    $('analyticsLoading').classList.add('hidden');
+    $('analyticsBody').classList.remove('hidden');
+    renderAnalytics();
+  } catch (error) {
+    if (request !== analyticsRequest) return;
+    $('analyticsLoading').textContent = `Analytics unavailable: ${error.message}`;
+  }
+}
+
+function linePath(values, xScale, yScale) {
+  return values.map((point, index) =>
+    `${index ? 'L' : 'M'}${xScale(point).toFixed(1)},${yScale(point).toFixed(1)}`
+  ).join(' ');
+}
+
+function renderTimeline(samples, duration, runtime, startCharge) {
+  const width = 800, height = 260, left = 42, right = 12, top = 12, bottom = 28;
+  const innerWidth = width - left - right, innerHeight = height - top - bottom;
+  const x = sample => left + innerWidth * (sample.time / Math.max(duration, 1));
+  const yFor = key => sample => top + innerHeight * (1 - sample[key] / 100);
+  const battery = samples.map(sample => ({
+    ...sample,
+    battery: clamp(startCharge - sample.time / 60 / runtime * 100),
+  }));
+  const yTicks = [0, 25, 50, 75, 100];
+  const xTicks = [0, duration / 2, duration];
+  const xLabel = value => duration < 180
+    ? `${Math.round(value)}s`
+    : `${(value / 60).toFixed(value === 0 ? 0 : 1)}m`;
+
+  $('timelineChart').innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Battery, motion, and lighting quality over the selected video">
+      <title>Operating profile across the selected video</title>
+      <desc>Estimated battery remaining, video-derived motion, and video-derived lighting quality on a shared zero to one hundred scale.</desc>
+      ${yTicks.map(value => {
+        const y = top + innerHeight * (1 - value / 100);
+        return `<line class="grid" x1="${left}" y1="${y}" x2="${width-right}" y2="${y}"></line>
+          <text class="axis-label" x="${left-8}" y="${y+3}" text-anchor="end">${value}</text>`;
+      }).join('')}
+      ${xTicks.map(value => {
+        const px = left + innerWidth * (value / Math.max(duration, 1));
+        return `<text class="axis-label" x="${px}" y="${height-7}" text-anchor="${value === 0 ? 'start' : value === duration ? 'end' : 'middle'}">${xLabel(value)}</text>`;
+      }).join('')}
+      <path class="battery-line" d="${linePath(battery, x, yFor('battery'))}"></path>
+      <path class="motion-line" d="${linePath(samples, x, yFor('motion'))}"></path>
+      <path class="lighting-line" d="${linePath(samples, x, yFor('lighting'))}"></path>
+    </svg>`;
+}
+
+function renderPareto(points) {
+  const width = 470, height = 260, left = 42, right = 12, top = 12, bottom = 31;
+  const innerWidth = width - left - right, innerHeight = height - top - bottom;
+  const x = point => left + innerWidth * point.comfort / 100;
+  const y = point => top + innerHeight * (1 - point.quality / 100);
+  const frontier = points.filter((point, index) => !points.some((other, otherIndex) =>
+    otherIndex !== index &&
+    other.comfort >= point.comfort &&
+    other.quality >= point.quality &&
+    (other.comfort > point.comfort || other.quality > point.quality)
+  )).sort((a, b) => a.comfort - b.comfort);
+  const ticks = [0, 25, 50, 75, 100];
+
+  $('paretoChart').innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Pareto frontier of ergonomic comfort and capture utility">
+      <title>Operating-state comfort and capture Pareto frontier</title>
+      <desc>Each point is a sampled video moment. The highlighted line connects moments not dominated on both estimated comfort and video-derived capture utility.</desc>
+      ${ticks.map(value => {
+        const py = top + innerHeight * (1 - value / 100);
+        const px = left + innerWidth * value / 100;
+        return `<line class="grid" x1="${left}" y1="${py}" x2="${width-right}" y2="${py}"></line>
+          <line class="grid" x1="${px}" y1="${top}" x2="${px}" y2="${height-bottom}"></line>
+          <text class="axis-label" x="${left-8}" y="${py+3}" text-anchor="end">${value}</text>
+          <text class="axis-label" x="${px}" y="${height-11}" text-anchor="middle">${value}</text>`;
+      }).join('')}
+      ${points.map(point => `<circle class="sample-point" cx="${x(point).toFixed(1)}" cy="${y(point).toFixed(1)}" r="2.5"></circle>`).join('')}
+      <path class="pareto-line" d="${linePath(frontier, x, y)}"></path>
+      ${frontier.map(point => `<circle class="pareto-point" cx="${x(point).toFixed(1)}" cy="${y(point).toFixed(1)}" r="4"></circle>`).join('')}
+      <text class="axis-label" x="${left + innerWidth/2}" y="${height-1}" text-anchor="middle">Ergonomic comfort →</text>
+      <text class="axis-label" transform="translate(10 ${top+innerHeight/2}) rotate(-90)" text-anchor="middle">Capture utility →</text>
+    </svg>`;
+}
+
+function renderFitRows(comfort, capture, runtime, startCharge) {
+  const portability = clamp(100 - Math.max(0, analyticsData.device.weight_grams - 40) * 0.45);
+  const segments = [
+    {name: 'Personal safety', minutes: 120, weights: [0.30, 0.30, 0.40]},
+    {name: 'Security patrol', minutes: 480, weights: [0.50, 0.20, 0.30]},
+    {name: 'Field inspection', minutes: 240, weights: [0.30, 0.30, 0.40]},
+    {name: 'Creator / POV', minutes: 180, weights: [0.20, 0.35, 0.45]},
+  ];
+  $('fitRows').innerHTML = segments.map(segment => {
+    const batteryFit = clamp(runtime * startCharge / segment.minutes);
+    const ergonomicFit = comfort * 0.75 + portability * 0.25;
+    const score = batteryFit * segment.weights[0] +
+      ergonomicFit * segment.weights[1] + capture * segment.weights[2];
+    const readout = score >= 80 ? 'Strong fit' : score >= 65 ? 'Promising' : 'Constrained';
+    return `<tr>
+      <td>${segment.name}</td>
+      <td><div class="fit-score"><div class="fit-bar"><span style="width:${score.toFixed(0)}%"></span></div>${score.toFixed(0)}</div></td>
+      <td>${batteryFit.toFixed(0)}</td>
+      <td>${ergonomicFit.toFixed(0)}</td>
+      <td>${capture.toFixed(0)}</td>
+      <td>${readout}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAnalytics() {
+  if (!analyticsData) return;
+  const samples = analyticsData.samples;
+  const device = analyticsData.device;
+  const duration = analyticsData.clip.duration || samples.at(-1)?.time || 0;
+  const startCharge = Number($('startCharge').value);
+  const mountCm = Number($('mountDistance').value);
+  const targetMinutes = Number($('targetSession').value);
+  const runtime = device.nominal_runtime_minutes;
+  const batteryEnd = clamp(startCharge - duration / 60 / runtime * 100);
+  const eta = runtime * batteryEnd / 100;
+
+  $('startChargeValue').textContent = `${startCharge}%`;
+  $('mountDistanceValue').textContent = `${mountCm} cm`;
+
+  const points = samples.map(sample => {
+    const comfort = clamp(
+      100 - device.weight_grams * 0.12 - sample.motion * 0.25 - (mountCm - 5) * 0.35
+    );
+    return {...sample, comfort};
+  });
+  const avgComfort = average(points.map(point => point.comfort));
+  const avgCapture = average(points.map(point => point.quality));
+  const staticMoment = device.weight_grams / 1000 * 9.80665 * mountCm / 100;
+  const targetBatteryFit = clamp(runtime * startCharge / targetMinutes);
+  const targetFit = targetBatteryFit * .4 + avgComfort * .3 + avgCapture * .3;
+
+  $('metricBattery').textContent = `≈${batteryEnd.toFixed(1)}%`;
+  $('metricBatterySub').textContent = `${(6000 / runtime).toFixed(1)}% drain per hour · model`;
+  $('metricEta').textContent = `≈${fmtEta(eta)}`;
+  const runtimeRange = device.claimed_runtime_range_minutes || [runtime, runtime];
+  $('metricEtaSub').textContent =
+    `${fmtEta(runtimeRange[0] * batteryEnd / 100)}–${fmtEta(runtimeRange[1] * batteryEnd / 100)} listing-based range`;
+  $('metricWeight').textContent = `${device.weight_grams.toFixed(0)} g`;
+  $('metricLoad').textContent = `≈${staticMoment.toFixed(2)} N·m`;
+  $('metricTorque').textContent = `${mountCm} cm assumed lever arm · static model`;
+  $('metricFit').textContent = `≈${targetFit.toFixed(0)}/100`;
+  $('metricFitSub').textContent = `${targetMinutes / 60}h target · ${targetBatteryFit.toFixed(0)} battery fit`;
+
+  renderTimeline(samples, duration, runtime, startCharge);
+  renderPareto(points);
+  renderFitRows(avgComfort, avgCapture, runtime, startCharge);
+  $('analyticsSampleInfo').textContent =
+    `${samples.length} frame samples · ${analyticsData.summary.stable_share.toFixed(0)}% stable · ${analyticsData.summary.average_lighting.toFixed(0)} lighting score`;
+}
+
+$('analyticsClip').onchange = event => loadAnalytics(event.target.value);
+for (const id of ['startCharge', 'mountDistance', 'targetSession']) {
+  $(id).oninput = renderAnalytics;
+}
+
+/* ---------- archive ---------- */
+async function pollClips() {
+  try {
+    const list = await fetch('/api/clips').then(r => r.json());
+    renderClips(list.clips);
+  } catch {
+    // The status poll owns the global connection indicator.
+  }
+}
+
+function renderClips(list) {
+  clips = list;
+  $('count').textContent = list.length || '';
+  syncAnalyticsOptions(list);
+
+  if (!list.length) {
+    clipsEl.innerHTML = '<div class="empty"><h3>No clips</h3>Nothing in the camera\'s VIDEO folder yet.</div>';
+    return;
+  }
+
+  clipsEl.innerHTML = list.map(c => {
+    const badge = c.state === 'ready' ? `<span class="badge">${fmtDur(c.duration)}</span>`
+      : c.state === 'error' ? '<span class="badge error">failed</span>'
+      : `<span class="badge working">${c.state}</span>`;
+    const thumb = c.state === 'ready'
+      ? `<img src="/thumb/${c.id}.jpg" alt="" loading="lazy">`
+      : '<div class="noimg"></div>';
+    return `<button type="button" class="clip ${c.id === activeId ? 'active' : ''}" data-id="${c.id}">
+      ${thumb}
+      <div>
+        <div class="name">${c.name} ${badge}</div>
+        <div class="sub">${c.origin === 'local' ? 'sources/' : 'camera'} &middot; ${fmtSize(c.size)}${c.codec ? ' &middot; ' + c.codec : ''}</div>
+      </div>
+    </button>`;
+  }).join('');
+
+  for (const el of clipsEl.querySelectorAll('.clip')) {
+    el.onclick = () => select(el.dataset.id);
+  }
+
+  // Auto-play the newest ready clip: on first load, and afterwards whenever a
+  // genuinely new one appears while "Auto-play newest" is on.
+  const newestReady = list.find(c => c.state === 'ready');
+  if (newestReady) {
+    const archiveVisible = !$('archiveView').classList.contains('hidden');
+    const isNew = newestKnown !== null && newestReady.id !== newestKnown;
+    if (archiveVisible && (firstLoad || (isNew && $('tail').checked))) {
+      select(newestReady.id, !firstLoad);
+      firstLoad = false;
+    }
+    newestKnown = newestReady.id;
+  }
+}
+
+function select(id, autoplay = true) {
+  const clip = clips.find(c => c.id === id);
+  if (!clip || clip.state !== 'ready') return;
+  if (activeId !== id) {
+    activeId = id;
+    player.src = `/media/${id}.mp4`;
+    const archiveVisible = !$('archiveView').classList.contains('hidden');
+    if (autoplay && archiveVisible) player.play().catch(() => {});
+    for (const el of clipsEl.querySelectorAll('.clip')) {
+      el.classList.toggle('active', el.dataset.id === id);
+    }
+  }
+  $('stageTitle').innerHTML = `${clip.name} <span>&middot; ${fmtDur(clip.duration)} &middot; ${fmtTime(clip.mtime)}</span>`;
+  $('dlMp4').disabled = $('dlRaw').disabled = false;
+  if (analyticsId !== id) loadAnalytics(id);
+}
+
+$('dlMp4').onclick = () => activeId && (location.href = `/media/${activeId}.mp4`);
+$('dlRaw').onclick = () => activeId && (location.href = `/raw/${activeId}.avi`);
+
+pollStatus();
+setInterval(pollStatus, 1000);
+pollClips();
+setInterval(() => {
+  if (!$('archiveView').classList.contains('hidden')) pollClips();
+}, 5000);
+startStream();
+setInterval(pollStream, 2000);
+pollTranscript();
+setInterval(pollTranscript, 1000);
+</script>
+</body>
+</html>

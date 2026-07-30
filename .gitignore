@@ -1,0 +1,8 @@
+.cache/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+bodycam_capture
+sources/
+*.part

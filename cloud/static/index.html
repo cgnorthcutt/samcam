@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sam Cam · Live</title>
+<style>
+  :root { color-scheme: dark; --bg:#0d0f12; --panel:#151a20; --line:#29313b; --text:#ebeff5; --muted:#97a2b0; --red:#ff5353; --green:#45d98b; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:15px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:14px 22px; background:var(--panel); border-bottom:1px solid var(--line); }
+  .brand { font-weight:750; letter-spacing:.02em; white-space:nowrap; }
+  .dot { width:9px; height:9px; display:inline-block; margin-right:8px; border-radius:50%; background:var(--red); box-shadow:0 0 0 3px #ff535326; }
+  .dot.live { background:var(--green); box-shadow:0 0 0 3px #45d98b26; }
+  .worker-form { margin-left:auto; display:flex; gap:8px; }
+  input,button { border:1px solid var(--line); border-radius:7px; background:#1d242c; color:var(--text); font:inherit; padding:7px 10px; }
+  input { min-width:150px; } button { cursor:pointer; } button:hover { background:#26313d; }
+  main { max-width:1320px; margin:0 auto; padding:22px; display:grid; grid-template-columns:minmax(0,1fr) minmax(280px,360px); gap:18px; }
+  .stage,.transcript { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .stream { position:relative; min-height:320px; aspect-ratio:16/9; background:#000; }
+  #feed { width:100%; height:100%; position:absolute; inset:0; object-fit:contain; }
+  .offline { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--muted); background:#000; }
+  .offline b { display:block; color:var(--text); font-size:18px; margin-bottom:5px; }
+  .live-label { position:absolute; top:13px; left:13px; background:#101419d9; color:#ff9696; border:1px solid #683233; padding:3px 9px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.11em; }
+  .bar,.transcript-head { display:flex; align-items:center; gap:10px; padding:11px 14px; border-top:1px solid var(--line); }
+  .bar strong,.transcript-head strong { margin-right:auto; } .hint { color:var(--muted); font-size:12px; }
+  .transcript-head { border-top:0; border-bottom:1px solid var(--line); }
+  #transcript { min-height:340px; max-height:calc(100vh - 155px); overflow:auto; padding:13px 15px; }
+  .line + .line { margin-top:9px; } .time { color:var(--muted); font-size:12px; margin-right:8px; font-variant-numeric:tabular-nums; }
+  .empty { color:var(--muted); font-size:13px; } .hidden { display:none !important; }
+  .notice { grid-column:1 / -1; color:var(--muted); font-size:12px; }
+  @media (max-width:800px) { header { flex-wrap:wrap; } .worker-form { margin-left:0; width:100%; } input { flex:1; } main { grid-template-columns:1fr; padding:14px; } #transcript { min-height:160px; max-height:260px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span id="dot" class="dot"></span>Sam Cam</div>
+  <form class="worker-form" id="workerForm">
+    <label class="hint" for="worker">Worker</label>
+    <input id="worker" maxlength="63" autocomplete="name" value="Curtis" aria-label="Worker name">
+    <button>Watch</button>
+  </form>
+</header>
+<main>
+  <section class="stage">
+    <div class="stream">
+      <img id="feed" class="hidden" alt="Live Sam Cam video">
+      <div class="offline" id="offline"><div><b id="offlineTitle">Worker Curtis is not streaming at this time</b><span>Live video appears here when their Sam Cam is connected and recording.</span></div></div>
+      <div id="liveLabel" class="live-label hidden">● LIVE</div>
+    </div>
+    <div class="bar"><strong id="status">Checking Curtis…</strong><span class="hint">Public demo feed</span></div>
+  </section>
+  <section class="transcript">
+    <div class="transcript-head"><strong>Live transcript</strong><span id="transcriptStatus" class="hint">Waiting for stream</span></div>
+    <div id="transcript"><div class="empty">Transcript will appear while the worker is live.</div></div>
+  </section>
+  <p class="notice">Sam Cam is a public demo. The laptop with the USB body camera publishes only its current live feed; when it goes offline, this page does not show archived footage.</p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let worker = new URLSearchParams(location.search).get('worker') || 'Curtis';
+let imageGeneration = 0;
+$('worker').value = worker;
+
+function label(name = worker) { return `Worker ${name} is not streaming at this time`; }
+function setWorker(next) {
+  worker = next.trim() || 'Curtis';
+  $('worker').value = worker;
+  const url = new URL(location.href); url.searchParams.set('worker', worker); history.replaceState({}, '', url);
+  imageGeneration += 1;
+  $('feed').removeAttribute('src');
+  renderOffline();
+}
+function renderOffline() {
+  $('dot').classList.remove('live'); $('feed').classList.add('hidden');
+  $('offline').classList.remove('hidden'); $('liveLabel').classList.add('hidden');
+  $('offlineTitle').textContent = label(); $('status').textContent = label();
+}
+function renderLive(data) {
+  $('dot').classList.add('live'); $('offline').classList.add('hidden'); $('feed').classList.remove('hidden'); $('liveLabel').classList.remove('hidden');
+  $('status').textContent = `${data.worker || worker} is live`;
+  if (!$('feed').src || $('feed').dataset.worker !== worker) {
+    $('feed').dataset.worker = worker;
+    $('feed').src = `/stream/${encodeURIComponent(worker)}.mjpg?t=${Date.now()}`;
+  }
+}
+async function refreshStatus() {
+  try {
+    const response = await fetch(`/api/worker/${encodeURIComponent(worker)}`, {cache:'no-store'});
+    const data = await response.json();
+    data.streaming ? renderLive(data) : renderOffline();
+  } catch { renderOffline(); }
+}
+function displayTime(seconds) { seconds = Math.max(0, Math.floor(Number(seconds) || 0)); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,'0')}`; }
+async function refreshTranscript() {
+  try {
+    const response = await fetch(`/api/worker/${encodeURIComponent(worker)}/transcript`, {cache:'no-store'});
+    const data = await response.json(); const target = $('transcript'); target.replaceChildren();
+    const lines = (data.lines || []).slice(-30);
+    if (!lines.length) { target.innerHTML = '<div class="empty">No recognized speech yet.</div>'; $('transcriptStatus').textContent = 'Listening'; return; }
+    for (const line of lines) { const row = document.createElement('div'); row.className = 'line'; row.innerHTML = `<span class="time">${displayTime(line.started)}</span>`; row.append(document.createTextNode(line.text)); target.append(row); }
+    target.scrollTop = target.scrollHeight; $('transcriptStatus').textContent = 'Live';
+  } catch { $('transcriptStatus').textContent = 'Unavailable'; }
+}
+$('workerForm').addEventListener('submit', (event) => { event.preventDefault(); setWorker($('worker').value); });
+$('feed').addEventListener('error', () => { if ($('feed').dataset.worker === worker) setTimeout(refreshStatus, 500); });
+refreshStatus(); refreshTranscript(); setInterval(refreshStatus, 1000); setInterval(refreshTranscript, 1500);
+</script>
+</body>
+</html>

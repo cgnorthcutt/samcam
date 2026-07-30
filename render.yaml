@@ -1,0 +1,13 @@
+services:
+  - type: web
+    runtime: python
+    name: samcam-relay
+    region: oregon
+    buildCommand: pip install -r requirements-relay.txt
+    startCommand: uvicorn cloud.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    numInstances: 1
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
