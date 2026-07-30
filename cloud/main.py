@@ -25,7 +25,7 @@ try:  # Allows local relay tests before its optional database dependency is inst
 except ImportError:  # pragma: no cover - exercised only by a minimal local install
     asyncpg = None  # type: ignore[assignment]
 
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -33,11 +33,13 @@ HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 MAX_FRAME_BYTES = 5_000_000
 MAX_ARCHIVE_SEGMENT_BYTES = 8_000_000
+MAX_ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 FRAME_FRESH_SECONDS = 5.0
 PUBLISHER_FRESH_SECONDS = 8.0
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{3,127}$")
 ARCHIVE_MAGIC = b"SCAS"
+ARCHIVE_RECORDING_MAGIC = b"SCAR"
 
 
 def require_worker_name(raw_name: str) -> tuple[str, str]:
@@ -77,6 +79,8 @@ class ArchiveStore:
         self.error: str | None = None
         self.memory_sessions: dict[str, dict[str, Any]] = {}
         self.memory_segments: dict[tuple[str, int], dict[str, Any]] = {}
+        self.memory_recording_chunks: dict[tuple[str, int], dict[str, Any]] = {}
+        self.memory_recordings: dict[str, dict[str, Any]] = {}
         self.memory_transcripts: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def start(self) -> None:
@@ -117,6 +121,20 @@ class ArchiveStore:
                         received_at DOUBLE PRECISION NOT NULL,
                         text TEXT NOT NULL,
                         PRIMARY KEY (session_id, line_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS samcam_archive_recording_chunks (
+                        session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                        chunk_index INTEGER NOT NULL,
+                        data BYTEA NOT NULL,
+                        size_bytes INTEGER NOT NULL,
+                        PRIMARY KEY (session_id, chunk_index)
+                    );
+                    CREATE TABLE IF NOT EXISTS samcam_archive_recordings (
+                        session_id TEXT PRIMARY KEY REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                        content_type TEXT NOT NULL,
+                        chunk_count INTEGER NOT NULL,
+                        size_bytes BIGINT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
                     CREATE INDEX IF NOT EXISTS samcam_archive_sessions_worker_idx
                         ON samcam_archive_sessions (worker_name, started_at DESC);
@@ -218,6 +236,127 @@ class ArchiveStore:
             self.error = f"archive segment failed: {exc}"[-300:]
             print(self.error, flush=True)
 
+    async def save_recording_chunk(self, metadata: dict[str, Any], data: bytes) -> None:
+        """Save one byte range of a finished, stitched MP4 recording."""
+        session_id = require_session_id(metadata.get("session_id"))
+        index = int(metadata.get("index", -1))
+        count = int(metadata.get("count", 0))
+        total_size = int(metadata.get("size_bytes", 0))
+        if (
+            index < 0 or count <= 0 or index >= count or count > 100_000
+            or total_size <= 0 or len(data) <= 0 or len(data) > MAX_ARCHIVE_RECORDING_CHUNK_BYTES
+        ):
+            return
+        record = {
+            "session_id": session_id,
+            "index": index,
+            "count": count,
+            "total_size": total_size,
+            "size_bytes": len(data),
+            "data": data,
+        }
+        self.memory_recording_chunks[(session_id, index)] = record
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO samcam_archive_recording_chunks (session_id, chunk_index, data, size_bytes)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (session_id, chunk_index) DO UPDATE SET
+                      data = EXCLUDED.data,
+                      size_bytes = EXCLUDED.size_bytes
+                    """,
+                    session_id, index, data, len(data),
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive recording chunk failed: {exc}"[-300:]
+            print(self.error, flush=True)
+
+    async def complete_recording(self, session_id: str, chunk_count: int, size_bytes: int) -> None:
+        session_id = require_session_id(session_id)
+        if chunk_count <= 0 or chunk_count > 100_000 or size_bytes <= 0:
+            return
+        memory_parts = [
+            value for (candidate, _), value in self.memory_recording_chunks.items() if candidate == session_id
+        ]
+        if len(memory_parts) == chunk_count and sum(int(part["size_bytes"]) for part in memory_parts) == size_bytes:
+            self.memory_recordings[session_id] = {
+                "session_id": session_id,
+                "content_type": "video/mp4",
+                "chunk_count": chunk_count,
+                "size_bytes": size_bytes,
+            }
+        if self.pool is None:
+            return
+        try:
+            async with self.pool.acquire() as connection:
+                async with connection.transaction():
+                    actual = await connection.fetchrow(
+                        """
+                        SELECT COUNT(*)::int AS chunk_count, COALESCE(SUM(size_bytes), 0)::bigint AS size_bytes
+                        FROM samcam_archive_recording_chunks
+                        WHERE session_id = $1
+                        """,
+                        session_id,
+                    )
+                    if actual is None or int(actual["chunk_count"]) != chunk_count or int(actual["size_bytes"]) != size_bytes:
+                        return
+                    await connection.execute(
+                        """
+                        INSERT INTO samcam_archive_recordings (session_id, content_type, chunk_count, size_bytes)
+                        VALUES ($1, 'video/mp4', $2, $3)
+                        ON CONFLICT (session_id) DO UPDATE SET
+                          content_type = EXCLUDED.content_type,
+                          chunk_count = EXCLUDED.chunk_count,
+                          size_bytes = EXCLUDED.size_bytes,
+                          created_at = NOW()
+                        """,
+                        session_id, chunk_count, size_bytes,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive recording completion failed: {exc}"[-300:]
+            print(self.error, flush=True)
+
+    async def recording(self, session_id: str) -> dict[str, Any] | None:
+        session_id = require_session_id(session_id)
+        if self.pool is None:
+            metadata = self.memory_recordings.get(session_id)
+            if metadata is None:
+                return None
+            parts = [
+                value for (candidate, _), value in sorted(self.memory_recording_chunks.items()) if candidate == session_id
+            ]
+            if len(parts) != int(metadata["chunk_count"]):
+                return None
+            data = b"".join(part["data"] for part in parts)
+            if len(data) != int(metadata["size_bytes"]):
+                return None
+            return {**metadata, "data": data}
+        try:
+            async with self.pool.acquire() as connection:
+                metadata = await connection.fetchrow(
+                    "SELECT content_type, chunk_count, size_bytes FROM samcam_archive_recordings WHERE session_id = $1",
+                    session_id,
+                )
+                if metadata is None:
+                    return None
+                rows = await connection.fetch(
+                    "SELECT data FROM samcam_archive_recording_chunks WHERE session_id = $1 ORDER BY chunk_index",
+                    session_id,
+                )
+            if len(rows) != int(metadata["chunk_count"]):
+                return None
+            data = b"".join(row["data"] for row in rows)
+            if len(data) != int(metadata["size_bytes"]):
+                return None
+            return {**dict(metadata), "data": data}
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"archive recording read failed: {exc}"[-300:]
+            print(self.error, flush=True)
+            return None
+
     async def save_transcript(self, session_id: str, line: dict[str, Any]) -> None:
         session_id = require_session_id(session_id)
         text = " ".join(str(line.get("text", "")).split())[:1_000]
@@ -307,11 +446,14 @@ class ArchiveStore:
         session_id = record["session_id"]
         segments = [value for (candidate, _), value in self.memory_segments.items() if candidate == session_id]
         transcripts = [value for (candidate, _), value in self.memory_transcripts.items() if candidate == session_id]
+        recording = self.memory_recordings.get(session_id)
         return {
             **record,
             "duration_seconds": session_duration(record),
             "segment_count": len(segments),
             "size_bytes": sum(int(item["size_bytes"]) for item in segments),
+            "recording_ready": recording is not None,
+            "recording_size_bytes": int(recording["size_bytes"]) if recording else 0,
             "transcript_count": len(transcripts),
         }
 
@@ -333,6 +475,8 @@ class ArchiveStore:
                     SELECT s.session_id, s.worker_name, s.source, s.started_at, s.ended_at,
                       COALESCE((SELECT COUNT(*) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS segment_count,
                       COALESCE((SELECT SUM(g.size_bytes) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS size_bytes,
+                      EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
                       COALESCE((SELECT COUNT(*) FROM samcam_archive_transcripts t WHERE t.session_id = s.session_id), 0) AS transcript_count
                     FROM samcam_archive_sessions s
                     WHERE LOWER(s.worker_name) = LOWER($1)
@@ -372,7 +516,14 @@ class ArchiveStore:
         try:
             async with self.pool.acquire() as connection:
                 session = await connection.fetchrow(
-                    "SELECT session_id, worker_name, source, started_at, ended_at FROM samcam_archive_sessions WHERE session_id = $1", session_id
+                    """
+                    SELECT s.session_id, s.worker_name, s.source, s.started_at, s.ended_at,
+                      EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes
+                    FROM samcam_archive_sessions s
+                    WHERE s.session_id = $1
+                    """,
+                    session_id,
                 )
                 if session is None:
                     return None
@@ -593,6 +744,21 @@ def parse_archive_segment(payload: bytes) -> tuple[dict[str, Any], bytes] | None
     return metadata, payload[8 + header_size:]
 
 
+def parse_archive_recording_chunk(payload: bytes) -> tuple[dict[str, Any], bytes] | None:
+    if len(payload) < 12 or not payload.startswith(ARCHIVE_RECORDING_MAGIC):
+        return None
+    header_size = int.from_bytes(payload[4:8], "big")
+    if header_size <= 0 or header_size > 8_192 or len(payload) <= 8 + header_size:
+        return None
+    try:
+        metadata = json.loads(payload[8:8 + header_size])
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("type") != "archive_recording_chunk":
+        return None
+    return metadata, payload[8 + header_size:]
+
+
 @app.get("/")
 async def home() -> FileResponse:
     return FileResponse(STATIC / "index.html", media_type="text/html")
@@ -708,6 +874,41 @@ async def archive_segment(session_id: str, sequence: int) -> Response:
     return Response(content=segment["data"], media_type=segment.get("content_type", "video/mp4"), headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
+@app.get("/archive/{session_id}/video.mp4")
+async def archive_recording(session_id: str, request: Request) -> Response:
+    try:
+        recording = await archive.recording(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if recording is None:
+        raise HTTPException(status_code=404, detail="stitched archive recording is not ready")
+    data = recording["data"]
+    total = len(data)
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=31536000, immutable"}
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("range", ""))
+    if match:
+        try:
+            start = int(match.group(1)) if match.group(1) else 0
+            end = int(match.group(2)) if match.group(2) else total - 1
+        except ValueError:
+            start, end = 0, total - 1
+        if start >= total or start > end:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{total}"})
+        end = min(end, total - 1)
+        payload = data[start:end + 1]
+        return Response(
+            content=payload,
+            status_code=206,
+            media_type=recording.get("content_type", "video/mp4"),
+            headers={**headers, "Content-Range": f"bytes {start}-{end}/{total}", "Content-Length": str(len(payload))},
+        )
+    return Response(
+        content=data,
+        media_type=recording.get("content_type", "video/mp4"),
+        headers={**headers, "Content-Length": str(total)},
+    )
+
+
 @app.get("/stream/{worker_name}.mjpg")
 async def worker_stream(worker_name: str) -> StreamingResponse:
     try:
@@ -765,8 +966,16 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
                         await archive.save_segment(metadata, segment_data)
                     except (ValueError, TypeError):
                         pass
-                elif len(payload_bytes) <= MAX_FRAME_BYTES:
-                    await apply_frame(state, token, payload_bytes)
+                else:
+                    parsed_recording = parse_archive_recording_chunk(payload_bytes)
+                    if parsed_recording is not None:
+                        metadata, recording_data = parsed_recording
+                        try:
+                            await archive.save_recording_chunk(metadata, recording_data)
+                        except (ValueError, TypeError):
+                            pass
+                    elif len(payload_bytes) <= MAX_FRAME_BYTES:
+                        await apply_frame(state, token, payload_bytes)
                 continue
             raw_text = message.get("text")
             if not raw_text:
@@ -794,6 +1003,15 @@ async def publish_worker(websocket: WebSocket, worker_name: str) -> None:
                     lines = [line for line in payload["lines"] if isinstance(line, dict)]
                     await archive.replace_transcript(require_session_id(payload.get("session_id")), lines)
                 except ValueError:
+                    pass
+            elif kind == "archive_recording_complete":
+                try:
+                    await archive.complete_recording(
+                        require_session_id(payload.get("session_id")),
+                        int(payload.get("chunk_count", 0)),
+                        int(payload.get("size_bytes", 0)),
+                    )
+                except (TypeError, ValueError):
                     pass
             elif kind in {"transcript", "archive_transcript"} and isinstance(payload.get("line"), dict):
                 if kind == "transcript":

@@ -37,8 +37,10 @@ ARCHIVE_ROOT = Path(os.environ.get("SAMCAM_ARCHIVE_DIR", str(HERE / "archives"))
 ARCHIVE_SEGMENT_SECONDS = max(5.0, float(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_SECONDS", "10")))
 ARCHIVE_FPS = max(1, int(os.environ.get("SAMCAM_ARCHIVE_FPS", "30")))
 MAX_ARCHIVE_SEGMENT_BYTES = 8_000_000
+ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 RECONNECT_SECONDS = 2.0
 ARCHIVE_MAGIC = b"SCAS"
+ARCHIVE_RECORDING_MAGIC = b"SCAR"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,15 @@ class LocalSegment:
     duration_seconds: float
     path: Path
     frame_count: int = 0
+
+
+@dataclass(frozen=True)
+class LocalRecordingChunk:
+    session_id: str
+    path: Path
+    index: int
+    count: int
+    size_bytes: int
 
 
 class SessionArchiver:
@@ -64,8 +75,11 @@ class SessionArchiver:
         self.active_sequence = 0
         self.active_segment_started_at: float | None = None
         self.active_segment_frames = 0
-        self.encoding: set[threading.Thread] = set()
+        self.encoding: dict[str, set[threading.Thread]] = {}
+        self.stitching: dict[str, threading.Thread] = {}
         self.uploaded: set[tuple[str, int]] = set()
+        self.uploaded_recording_chunks: set[tuple[str, int]] = set()
+        self.completed_recording_uploads: set[str] = set()
         self.errors: list[str] = []
 
     @staticmethod
@@ -79,6 +93,10 @@ class SessionArchiver:
     @staticmethod
     def _transcript_path(session_dir: Path) -> Path:
         return session_dir / "transcript.jsonl"
+
+    @staticmethod
+    def _recording_path(session_dir: Path) -> Path:
+        return session_dir / "recording.mp4"
 
     def _write_metadata(self, session_dir: Path, metadata: dict[str, Any]) -> None:
         target = self._metadata_path(session_dir)
@@ -139,6 +157,15 @@ class SessionArchiver:
                 self.errors.append(f"archive segment {segment.sequence}: {exc}"[-600:])
                 del self.errors[:-10]
 
+    def _finish_encoding(self, session_id: str, thread: threading.Thread) -> None:
+        with self.lock:
+            pending = self.encoding.get(session_id)
+            if pending is None:
+                return
+            pending.discard(thread)
+            if not pending:
+                self.encoding.pop(session_id, None)
+
     def _finish_segment_locked(self, ended_at: float) -> None:
         if self.active is None or self.active_dir is None or self.active_raw is None or self.active_segment_started_at is None:
             return
@@ -164,11 +191,90 @@ class SessionArchiver:
         )
 
         def encode() -> None:
-            self._encode_segment(raw_path, segment)
+            try:
+                self._encode_segment(raw_path, segment)
+            finally:
+                self._finish_encoding(segment.session_id, threading.current_thread())
 
         thread = threading.Thread(target=encode, daemon=True, name=f"samcam-archive-{sequence}")
-        self.encoding.add(thread)
+        self.encoding.setdefault(segment.session_id, set()).add(thread)
         thread.start()
+
+    def _wait_for_session_encoding(self, session_id: str, timeout: float = 300.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                pending = list(self.encoding.get(session_id, set()))
+            if not pending:
+                return True
+            for thread in pending:
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    return False
+                thread.join(remaining)
+
+    @staticmethod
+    def _ffconcat_path(path: Path) -> str:
+        return "'" + str(path.resolve()).replace("'", r"'\''") + "'"
+
+    def _stitch_recording(self, metadata: dict[str, Any]) -> None:
+        session_id = str(metadata["session_id"])
+        session_dir = self.root / session_id
+        output = self._recording_path(session_dir)
+        temporary = output.with_name(f"{output.stem}.part{output.suffix}")
+        manifest = session_dir / ".recording.ffconcat"
+        try:
+            if output.exists() and output.stat().st_size > 0:
+                return
+            if not self._wait_for_session_encoding(session_id):
+                raise RuntimeError("timed out waiting for archive parts to encode")
+            parts = sorted(session_dir.glob("segment-*.mp4"))
+            if not parts:
+                return
+            manifest.write_text("".join(f"file {self._ffconcat_path(path)}\n" for path in parts))
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg is None:
+                raise RuntimeError("ffmpeg is unavailable; could not stitch archive recording")
+            command = [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(manifest),
+                "-c", "copy", "-movflags", "+faststart", str(temporary),
+            ]
+            completed = subprocess.run(command, capture_output=True, timeout=600)
+            if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
+                detail = completed.stderr.decode(errors="replace").strip()[-500:]
+                raise RuntimeError(detail or "ffmpeg did not create a stitched recording")
+            temporary.replace(output)
+        except Exception as exc:  # noqa: BLE001 - individual archive recovery must not stop live publishing
+            with self.lock:
+                self.errors.append(f"archive recording {session_id}: {exc}"[-600:])
+                del self.errors[:-10]
+        finally:
+            manifest.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
+            with self.lock:
+                self.stitching.pop(session_id, None)
+
+    def _schedule_stitch_locked(self, metadata: dict[str, Any]) -> None:
+        session_id = str(metadata["session_id"])
+        session_dir = self.root / session_id
+        output = self._recording_path(session_dir)
+        if session_id in self.stitching or (output.exists() and output.stat().st_size > 0):
+            return
+        thread = threading.Thread(
+            target=self._stitch_recording,
+            args=(dict(metadata),),
+            daemon=True,
+            name=f"samcam-recording-{session_id[-8:]}",
+        )
+        self.stitching[session_id] = thread
+        thread.start()
+
+    def schedule_completed_recordings(self) -> None:
+        for metadata in self.manifests():
+            if metadata.get("ended_at"):
+                with self.lock:
+                    self._schedule_stitch_locked(metadata)
 
     def start(self, worker: str, source: str | None) -> dict[str, Any]:
         with self.lock:
@@ -234,6 +340,7 @@ class SessionArchiver:
             self.active["status"] = "complete"
             self._write_metadata(self.active_dir, self.active)
             completed = dict(self.active)
+            self._schedule_stitch_locked(completed)
             self.active = None
             self.active_dir = None
             return completed
@@ -241,13 +348,23 @@ class SessionArchiver:
     def reset_uploads(self) -> None:
         with self.lock:
             self.uploaded.clear()
+            self.uploaded_recording_chunks.clear()
+            self.completed_recording_uploads.clear()
 
     def wait_for_encoding(self, timeout: float = 180.0) -> None:
-        """Finish the active MP4 job before a graceful publisher shutdown."""
+        """Finish MP4 and stitched-recording work before a graceful shutdown."""
         deadline = time.monotonic() + timeout
-        for thread in list(self.encoding):
-            remaining = max(0.0, deadline - time.monotonic())
-            thread.join(remaining)
+        while True:
+            with self.lock:
+                threads = [thread for group in self.encoding.values() for thread in group]
+                threads.extend(self.stitching.values())
+            if not threads:
+                return
+            for thread in threads:
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    return
+                thread.join(remaining)
 
     def manifests(self) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
@@ -311,6 +428,51 @@ class SessionArchiver:
         with self.lock:
             self.uploaded.add((segment.session_id, segment.sequence))
 
+    def next_recording_chunk(self) -> LocalRecordingChunk | None:
+        for metadata in sorted(self.manifests(), key=lambda item: -float(item.get("started_at") or 0)):
+            if not metadata.get("ended_at"):
+                continue
+            session_id = str(metadata["session_id"])
+            path = self._recording_path(self.root / session_id)
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                continue
+            if size_bytes <= 0:
+                continue
+            count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
+            for index in range(count):
+                if (session_id, index) not in self.uploaded_recording_chunks:
+                    return LocalRecordingChunk(session_id, path, index, count, size_bytes)
+        return None
+
+    def mark_recording_chunk_uploaded(self, chunk: LocalRecordingChunk) -> None:
+        with self.lock:
+            self.uploaded_recording_chunks.add((chunk.session_id, chunk.index))
+
+    def next_recording_completion(self) -> tuple[str, int, int] | None:
+        for metadata in sorted(self.manifests(), key=lambda item: -float(item.get("started_at") or 0)):
+            if not metadata.get("ended_at"):
+                continue
+            session_id = str(metadata["session_id"])
+            if session_id in self.completed_recording_uploads:
+                continue
+            path = self._recording_path(self.root / session_id)
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                continue
+            if size_bytes <= 0:
+                continue
+            count = max(1, (size_bytes + ARCHIVE_RECORDING_CHUNK_BYTES - 1) // ARCHIVE_RECORDING_CHUNK_BYTES)
+            if all((session_id, index) in self.uploaded_recording_chunks for index in range(count)):
+                return session_id, count, size_bytes
+        return None
+
+    def mark_recording_complete(self, session_id: str) -> None:
+        with self.lock:
+            self.completed_recording_uploads.add(session_id)
+
 
 def relay_websocket_url() -> str:
     parsed = urlsplit(RELAY_URL)
@@ -355,18 +517,18 @@ async def sync_archive_index(archiver: SessionArchiver, send: Any, exclude_sessi
         })
 
 
-async def upload_next_segment(archiver: SessionArchiver, send: Any) -> None:
+async def upload_next_segment(archiver: SessionArchiver, send: Any) -> bool:
     segment = archiver.next_segment()
     if segment is None:
-        return
+        return False
     try:
         data = await asyncio.to_thread(segment.path.read_bytes)
     except OSError:
-        return
+        return False
     if not data or len(data) > MAX_ARCHIVE_SEGMENT_BYTES:
         print(f"  archive segment {segment.path.name} exceeds the {MAX_ARCHIVE_SEGMENT_BYTES // 1_000_000} MB relay limit", file=sys.stderr)
         archiver.mark_uploaded(segment)
-        return
+        return False
     metadata = json.dumps({
         "type": "archive_segment",
         "session_id": segment.session_id,
@@ -376,6 +538,48 @@ async def upload_next_segment(archiver: SessionArchiver, send: Any) -> None:
     }, separators=(",", ":")).encode()
     await send(ARCHIVE_MAGIC + len(metadata).to_bytes(4, "big") + metadata + data)
     archiver.mark_uploaded(segment)
+    return True
+
+
+async def upload_next_recording_chunk(archiver: SessionArchiver, send: Any) -> bool:
+    chunk = archiver.next_recording_chunk()
+    if chunk is None:
+        return False
+    start = chunk.index * ARCHIVE_RECORDING_CHUNK_BYTES
+    try:
+        def read_chunk() -> bytes:
+            with chunk.path.open("rb") as handle:
+                handle.seek(start)
+                return handle.read(ARCHIVE_RECORDING_CHUNK_BYTES)
+        data = await asyncio.to_thread(read_chunk)
+    except OSError:
+        return False
+    if not data:
+        return False
+    metadata = json.dumps({
+        "type": "archive_recording_chunk",
+        "session_id": chunk.session_id,
+        "index": chunk.index,
+        "count": chunk.count,
+        "size_bytes": chunk.size_bytes,
+    }, separators=(",", ":")).encode()
+    await send(ARCHIVE_RECORDING_MAGIC + len(metadata).to_bytes(4, "big") + metadata + data)
+    archiver.mark_recording_chunk_uploaded(chunk)
+    return True
+
+
+async def publish_completed_recording(archiver: SessionArchiver, send: Any) -> None:
+    completed = archiver.next_recording_completion()
+    if completed is None:
+        return
+    session_id, chunk_count, size_bytes = completed
+    await send({
+        "type": "archive_recording_complete",
+        "session_id": session_id,
+        "chunk_count": chunk_count,
+        "size_bytes": size_bytes,
+    })
+    archiver.mark_recording_complete(session_id)
 
 
 async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asyncio.Event, archiver: SessionArchiver) -> None:
@@ -391,6 +595,7 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
         for line in archiver.transcript_lines(announced_session_id):
             await send({"type": "transcript", "line": line})
         needs_transcript_watermark = True
+    archiver.schedule_completed_recordings()
     await sync_archive_index(archiver, send, exclude_session_id=announced_session_id)
     while not stop.is_set():
         stream = await get_json(session, "/api/stream")
@@ -445,7 +650,13 @@ async def publish_status(session: aiohttp.ClientSession, send: Any, stop: asynci
                     )
                     archiver.append_transcript(event)
                     await send({"type": "transcript", "line": event})
-        await upload_next_segment(archiver, send)
+        segment_uploaded = await upload_next_segment(archiver, send)
+        # Short MP4 parts are retained for reliable ingest, while completed
+        # sessions are also uploaded as one stitched MP4 for normal playback.
+        # Give a currently recording session's next part priority first.
+        if not segment_uploaded:
+            await upload_next_recording_chunk(archiver, send)
+            await publish_completed_recording(archiver, send)
         try:
             await asyncio.wait_for(stop.wait(), timeout=1.0)
         except asyncio.TimeoutError:
