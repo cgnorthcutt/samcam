@@ -144,7 +144,7 @@ class ArchiveStore:
             "ended_at": finite_timestamp(session["ended_at"]) if session.get("ended_at") else None,
         }
         prior = self.memory_sessions.get(session_id)
-        self.memory_sessions[session_id] = {**(prior or {}), **record, "ended_at": record["ended_at"] or (prior or {}).get("ended_at")}
+        self.memory_sessions[session_id] = {**(prior or {}), **record}
         if self.pool is None:
             return
         try:
@@ -157,7 +157,10 @@ class ArchiveStore:
                       worker_name = EXCLUDED.worker_name,
                       source = COALESCE(EXCLUDED.source, samcam_archive_sessions.source),
                       started_at = LEAST(EXCLUDED.started_at, samcam_archive_sessions.started_at),
-                      ended_at = COALESCE(EXCLUDED.ended_at, samcam_archive_sessions.ended_at)
+                      -- A new session_start has no end time and resumes an
+                      -- active stream after a relay restart. Archived-session
+                      -- sync carries an end time and keeps it finalized.
+                      ended_at = EXCLUDED.ended_at
                     """,
                     record["session_id"], record["worker_name"], record["source"], record["started_at"], record["ended_at"],
                 )
@@ -262,7 +265,12 @@ class ArchiveStore:
     async def list_sessions(self, worker_name: str) -> list[dict[str, Any]]:
         if self.pool is None:
             return sorted(
-                [self._memory_summary(record) for record in self.memory_sessions.values() if record["worker_name"].casefold() == worker_name.casefold()],
+                [
+                    self._memory_summary(record)
+                    for record in self.memory_sessions.values()
+                    if record["worker_name"].casefold() == worker_name.casefold()
+                    and (record.get("ended_at") is None or any(candidate == record["session_id"] for candidate, _ in self.memory_segments))
+                ],
                 key=lambda item: float(item["started_at"]), reverse=True,
             )
         try:
@@ -275,6 +283,9 @@ class ArchiveStore:
                       COALESCE((SELECT COUNT(*) FROM samcam_archive_transcripts t WHERE t.session_id = s.session_id), 0) AS transcript_count
                     FROM samcam_archive_sessions s
                     WHERE LOWER(s.worker_name) = LOWER($1)
+                      AND (s.ended_at IS NULL OR EXISTS (
+                        SELECT 1 FROM samcam_archive_segments g WHERE g.session_id = s.session_id
+                      ))
                     ORDER BY s.started_at DESC
                     LIMIT 100
                     """, worker_name,
