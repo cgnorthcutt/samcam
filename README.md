@@ -178,6 +178,30 @@ combine those measurements with stated product assumptions. These are planning
 estimates—not device telemetry, medical guidance, market research, or measured
 biomechanics.
 
+### Offline archive audio restoration
+
+Live sound is intentionally optimized for low latency and feedback safety. For
+a finished Archive MP4 that needs a cleaner, presentation-ready speech track,
+use the offline-only helper below on the worker laptop. It copies the existing
+video stream exactly as-is and writes a separate `recording.restored.mp4`; it
+does not change live capture, the relay, or the original archive.
+
+```bash
+python3 restore_archive_audio.py archives/SESSION_ID/recording.mp4
+```
+
+The deterministic two-pass pass resamples to 48 kHz, removes rumble and
+excessive high-frequency noise, uses supported de-click/de-clip and adaptive
+denoise filters, normalizes spoken audio to -16 LUFS, applies a true-peak
+limiter, and remuxes AAC-LC. It validates the output before atomically placing
+it, so an interruption leaves the source recording intact. Add `--mains-hz 60`
+only for a clearly audible 60 Hz electrical hum (or `50` where appropriate);
+hum notches are opt-in because they can thin some voices.
+
+Use `--dry-run` to inspect the exact FFmpeg commands, `--overwrite` only to
+replace an earlier restored output, and see `python3 restore_archive_audio.py
+--help` for the conservative `--no-denoise` and `--no-decrackle` fallbacks.
+
 ## Expected public states
 
 | What you see | Meaning | Normal next step |
