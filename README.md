@@ -85,8 +85,11 @@ queue so transcription cannot stall video capture.
   Pareto frontier.
 - **Clock sync** happens automatically once each time the camera mounts in
   storage mode.
-- The live UVC feed is not saved by this app. Any on-camera recording behavior
-  remains controlled by the camera firmware.
+- `server.py` is intentionally a live capture service: it does not persist UVC
+  video on its own. When it runs beside `publish_worker.py`, each live session
+  is saved locally under `archives/`, uploaded as playable parts, and then
+  stitched into one archived MP4 with its transcript. Any independent,
+  on-camera recording behavior remains controlled by the camera firmware.
 
 Transcription can be tuned with environment variables:
 
@@ -213,3 +216,18 @@ demo. Anyone who knows a worker name can watch it, and anyone can attempt to
 publish under a worker name. Delete the Render service after the demo, and do
 not use this configuration for private video. Never commit a Render API key or
 any other credential to this repository.
+
+## Fast final-demo check
+
+Use [docs/ROBUSTNESS_CHECKLIST.md](docs/ROBUSTNESS_CHECKLIST.md) immediately
+before recording. It is deliberately short, avoids destructive actions, and
+covers the USB mode transition, public relay, sound, archive handoff, and the
+two expected degraded states (a camera that is off and an archive database
+that is reconnecting).
+
+The automated regression suite is intentionally lightweight: it has no network
+or camera requirement and typically completes in well under a second.
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
