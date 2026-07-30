@@ -84,8 +84,13 @@ Transcription can be tuned with environment variables:
 BODYCAM_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo \
 BODYCAM_TRANSCRIPT_LANGUAGE=en \
 BODYCAM_TRANSCRIPT_CHUNK_SECONDS=3 \
+BODYCAM_TRANSCRIPT_MIN_AVG_LOGPROB=-1.0 \
 python3 server.py 8011
 ```
+
+`BODYCAM_TRANSCRIPT_MIN_AVG_LOGPROB` rejects uncertain model output from
+camera noise. Lower it to make transcription more permissive; raise it to
+favor fewer false lines.
 
 ## Useful files
 
