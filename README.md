@@ -1,9 +1,19 @@
 # Sam Cam
 
+[**Open the public demo at samcam.app →**](https://samcam.app)
+
 Sam Cam is a local live-view and transcription app for the
 [Mini Body Camera B08KY7KLPB](https://www.amazon.com/dp/B08KY7KLPB). It only
 uses the body camera's USB video and audio devices; it never substitutes the
 Mac camera, an iPhone, or another webcam.
+
+## Camera compatibility
+
+Sam Cam can also work with other camera sources that a laptop exposes as a
+compatible live stream or UVC-style video-and-audio source. The current app is
+optimized and validated with the USB body camera above. Example archival
+footage includes a previously hacked Meta/Oakley Vanguard glasses stream; this
+is provided as an archive example only.
 
 ## Run
 
