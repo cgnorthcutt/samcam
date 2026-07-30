@@ -181,11 +181,14 @@ biomechanics.
 ### Archive audio mastering and restoration
 
 Live sound is intentionally optimized for low latency and feedback safety. For
-a newly finished session, the publisher now automatically runs the same
-offline-only speech-mastering profile after stitching and before it uploads the
-final MP4. This never delays Live or the playable archive parts. It copies the
-existing video stream exactly as-is, re-encodes only audio, and falls back to a
-valid stitched MP4 if an optional repair dependency is unavailable.
+a newly finished session, the publisher makes an offline-only audio decision
+after stitching and before it uploads the final MP4; this never delays Live or
+the playable archive parts. Healthy full-bandwidth stereo audio (at least
+44.1 kHz, two channels, and 80 kb/s) is packet-remuxed with `-c:a copy` and
+verified against the source AAC packet hashes—no filters, downmixing, resample,
+normalization, or re-encode. The known low-rate mono USB body-camera profile
+uses the speech-mastering path below. If an optional repair dependency is
+unavailable, the publisher falls back to a valid stitched MP4.
 
 The automatic profile is enabled by default and can be configured without
 touching live audio:
@@ -221,6 +224,13 @@ hum notches are opt-in because they can thin some voices.
 Use `--dry-run` to inspect the exact FFmpeg commands, `--overwrite` only to
 replace an earlier restored output, and see `python3 restore_archive_audio.py
 --help` for the conservative `--no-denoise` and `--no-decrackle` fallbacks.
+
+The two bundled Meta Oakley Vanguard demo videos use browser-compatible H.264
+video with the original 48 kHz stereo AAC packets stream-copied from the device
+MOVs. Run `.venv/bin/python import_demo_archives.py --replace-media` when those
+private originals are present locally to refresh the demos, and see
+[`docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md`](docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md)
+for the packet/PCM regression contract.
 
 To replace the matching public archive MP4 without disturbing the Curtis Live
 worker, run the separate maintenance uploader after the output validates:

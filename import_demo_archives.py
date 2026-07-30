@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -147,6 +148,80 @@ def duration_seconds(path: Path) -> float:
     return duration
 
 
+def first_original_media(demo: Demo) -> Path | None:
+    """Return the supplied device capture when it is available locally.
+
+    The browser-compatible cache intentionally contains H.264 video, but it
+    can have a lower-bitrate AAC track than the supplied HEVC MOV.  The MOV is
+    the authoritative capture, so we use its audio bitstream without
+    re-encoding whenever it is present.
+    """
+    return next((path for path in demo.original_candidates() if path.is_file()), None)
+
+
+def merge_browser_video_with_original_audio(
+    browser_video: Path,
+    original_capture: Path,
+    destination: Path,
+) -> None:
+    """Create a browser-safe MP4 while preserving original AAC packets.
+
+    The first input supplies the existing H.264 video; the device MOV supplies
+    its original audio.  ``-c copy`` is deliberate: it avoids applying the
+    body-camera speech-repair pipeline, changing channel layout, or encoding a
+    second lossy AAC generation to a healthy stereo recording.
+    """
+    temporary = destination.with_name(f".{destination.stem}.audio-source.part{destination.suffix}")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is required to preserve original demo audio")
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(browser_video),
+        "-i",
+        str(original_capture),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-map_metadata",
+        "0",
+        "-map_chapters",
+        "0",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(temporary),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        if completed.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
+            detail = (completed.stderr or completed.stdout).strip()[-500:]
+            raise RuntimeError(detail or "ffmpeg could not merge the original demo audio")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def materialize_demo_recording(demo: Demo, destination: Path) -> None:
+    """Create the public demo recording without degrading device audio."""
+    original = first_original_media(demo)
+    if original is None:
+        # The repository can still be cloned without 100+ MB MOV sources.  In
+        # that case the known browser cache remains a playable fallback; the
+        # caller never claims that fallback is a lossless original-audio copy.
+        shutil.copyfile(demo.converted_path, destination)
+        return
+    merge_browser_video_with_original_audio(demo.converted_path, original, destination)
+
+
 def write_metadata(path: Path, metadata: dict[str, object]) -> None:
     serialized = json.dumps(metadata, separators=(",", ":"), sort_keys=True)
     if path.exists() and path.read_text() == serialized:
@@ -156,7 +231,7 @@ def write_metadata(path: Path, metadata: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def import_demo(demo: Demo) -> None:
+def import_demo(demo: Demo, *, replace_media: bool = False) -> None:
     source = demo.converted_path
     if not source.exists():
         raise FileNotFoundError(f"missing converted demo video: {source}")
@@ -165,10 +240,8 @@ def import_demo(demo: Demo) -> None:
     duration = duration_seconds(source)
     recorded_at = demo_recorded_at(demo)
     session_dir.mkdir(parents=True, exist_ok=True)
-    if not recording.exists():
-        temporary = recording.with_name("recording.part.mp4")
-        shutil.copyfile(source, temporary)
-        temporary.replace(recording)
+    if replace_media or not recording.exists():
+        materialize_demo_recording(demo, recording)
     metadata = {
         "session_id": demo.session_id,
         "worker_name": "Curtis",
@@ -183,9 +256,14 @@ def import_demo(demo: Demo) -> None:
     print(f"imported {demo.session_id}: {duration:.1f}s H.264/AAC MP4")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    arguments = argv if argv is not None else sys.argv[1:]
+    replace_media = "--replace-media" in arguments
+    unexpected = [argument for argument in arguments if argument != "--replace-media"]
+    if unexpected:
+        raise SystemExit(f"unknown argument(s): {' '.join(unexpected)}")
     for demo in DEMOS:
-        import_demo(demo)
+        import_demo(demo, replace_media=replace_media)
 
 
 if __name__ == "__main__":

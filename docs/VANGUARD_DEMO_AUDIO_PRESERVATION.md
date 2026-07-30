@@ -31,18 +31,19 @@ It skips clearly when the private originals are absent.  When they are
 available, it verifies that:
 
 1. both original MOVs are 48 kHz stereo AAC and exceed 100 kb/s;
-2. the saved archive MP4 has the same audio stream layout as its browser-ready
-   upload master; and
-3. the compressed AAC packets have identical SHA-256 hashes.  This catches an
-   archive re-encode even when a replacement keeps the same sample rate and
-   channel count.
+2. a fresh browser-ready archive MP4 preserves the raw original's AAC-LC
+   codec, 48 kHz sample rate, and stereo channel layout; and
+3. both the compressed AAC packet stream **and** decoded PCM have identical
+   SHA-256 hashes to the original MOV.  This catches an archive re-encode,
+   downmix, resample, trim, or DSP pass even when a replacement happens to
+   retain the same visible stream layout.
 
-The existing demo archive copies are therefore bit-for-bit audio-preserving
-relative to their `*.cache/*.mp4` upload masters.  The upload masters were
-created before archive import and are 96 kb/s stereo AAC; they are **not**
-bit-for-bit copies of the original MOV audio.  The test makes that provenance
-explicit so an archive regression is not mistaken for the earlier browser
-conversion.
+The browser-compatible `*.cache/*.mp4` files are H.264 video sources only;
+they were created before archive import and contain lower-bitrate 96 kb/s AAC.
+When an original MOV is present, the importer takes cache video but copies the
+original AAC packets into the final archive MP4.  If the private original is
+not available in a clone, it leaves the cache as a playable fallback and does
+not claim that fallback is source-lossless.
 
 ## Policy
 
@@ -52,9 +53,8 @@ de-clip, loudness normalization, sample-rate conversion, mono downmixing, or
 hum notches unless a separate diagnostic explicitly identifies a defect and a
 user elects to repair a derived copy.
 
-The automatic speech-mastering path currently targets recordings captured by
-the USB body-camera pipeline.  A future high-fidelity capture path must make
-this quality gate executable *before* it invokes that mastering helper; the
-real-demo contract above is the regression fixture for that work.  Until such
-a gate exists, import high-quality clips through the direct archive-copy path
-used by `import_demo_archives.py`.
+The automatic speech-mastering path targets recordings captured by the USB
+body-camera pipeline.  Its executable quality gate runs before mastering:
+known-good high-fidelity stereo inputs use audio stream-copy, while the known
+16 kHz mono body-camera profile remains eligible for measured repair.  The
+real-demo contract above is the regression fixture for this distinction.

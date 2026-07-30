@@ -8,7 +8,9 @@ into place only after it is known to contain the original video stream plus a
 new AAC audio stream.  It is therefore safe to re-run after a crash or laptop
 sleep.
 
-The default profile is conservative for close-mic speech:
+The default profile is conservative for degraded close-mic speech. Healthy
+full-bandwidth stereo audio bypasses this profile and is remuxed packet for
+packet instead:
 
 * SoX-quality resampling to 48 kHz (when the installed FFmpeg supports it)
 * high/low pass filtering to remove rumble and ultrasonic/screechy content

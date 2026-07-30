@@ -95,6 +95,7 @@ class RestoreArchiveAudioTests(unittest.TestCase):
         chain = loudnorm_apply_filter("highpass=f=75", measured)
         self.assertIn("measured_I=-23.120000", chain)
         self.assertIn("offset=0.420000", chain)
+        self.assertEqual(chain.count("alimiter="), 1)
         self.assertTrue(chain.endswith("latency=1"))
 
     def test_silent_valid_recording_uses_the_limiter_without_invalid_loudness_gain(self) -> None:

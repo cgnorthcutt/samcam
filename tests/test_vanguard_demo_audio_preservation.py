@@ -5,25 +5,27 @@ The original MOVs are intentionally not committed: together they are over
 can run this test to validate the real assets.  CI and clones without those
 private files skip clearly rather than substituting synthetic audio.
 
-The browser-compatible files in ``.cache`` were made before Sam Cam imported
-them.  This contract ensures archive import never applies another lossy audio
-pass or downmix: its saved MP4 must have the same AAC packet hash and audio
-stream layout as that upload master.
+The browser-compatible files in ``.cache`` provide H.264 video only.  This
+contract ensures archive import uses AAC packets from the original MOV rather
+than applying a lossy audio pass or downmix.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
-from import_demo_archives import DEMOS, Demo
+from import_demo_archives import DEMOS, merge_browser_video_with_original_audio
 
 
 FFPROBE = shutil.which("ffprobe")
 FFMPEG = shutil.which("ffmpeg")
+AUDIO_LAYOUT_FIELDS = ("codec_name", "profile", "sample_rate", "channels", "channel_layout")
 
 
 def probe_audio(path: Path) -> dict[str, object]:
@@ -84,6 +86,31 @@ def packet_hash(path: Path) -> str:
     return output.removeprefix(prefix)
 
 
+def pcm_hash(path: Path) -> str:
+    """Hash decoded PCM as an independent proof that playback is unchanged."""
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "s16le",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    return hashlib.sha256(result.stdout).hexdigest()
+
+
 @unittest.skipUnless(FFPROBE and FFMPEG, "ffmpeg and ffprobe are required for real-demo audio checks")
 class VanguardDemoAudioPreservationTests(unittest.TestCase):
     """Protect the high-quality two-channel demo import path from regressions."""
@@ -104,10 +131,6 @@ class VanguardDemoAudioPreservationTests(unittest.TestCase):
                 + ", ".join(missing)
             )
 
-    @staticmethod
-    def _archive_recording(demo: Demo) -> Path:
-        return Path(__file__).resolve().parents[1] / "archives" / demo.session_id / "recording.mp4"
-
     def test_raw_vanguard_sources_are_48khz_stereo_aac(self) -> None:
         """Confirm the actual supplied sources meet the high-fidelity gate."""
         for demo in DEMOS:
@@ -122,25 +145,32 @@ class VanguardDemoAudioPreservationTests(unittest.TestCase):
                 # it describes a quality class, not one encoder's exact rate.
                 self.assertGreater(int(audio["bit_rate"]), 100_000)
 
-    def test_archive_import_preserves_upload_master_aac_packets_and_stereo(self) -> None:
-        """Archive import must copy, not remaster, either supplied demo.
+    def test_archive_import_preserves_raw_aac_packets_and_stereo(self) -> None:
+        """Archive import must use raw audio, not the lower-bitrate cache.
 
         A packet hash is stricter than matching sample rate/channels: it
         catches AAC re-encoding even if a replacement retains stereo at 48 kHz.
+        The generated output also remains browser-playable because only its
+        H.264 video comes from the existing browser cache.
         """
-        for demo in DEMOS:
-            with self.subTest(demo=demo.original_filename):
-                archive = self._archive_recording(demo)
-                self.assertTrue(archive.is_file(), f"missing imported demo: {archive}")
-                self.assertTrue(demo.converted_path.is_file(), f"missing upload master: {demo.converted_path}")
-                master_audio = probe_audio(demo.converted_path)
-                archive_audio = probe_audio(archive)
-                self.assertEqual(
-                    archive_audio,
-                    master_audio,
-                    "archive import must not re-encode or downmix the demo upload master",
-                )
-                self.assertEqual(packet_hash(archive), packet_hash(demo.converted_path))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for demo in DEMOS:
+                with self.subTest(demo=demo.original_filename):
+                    archive = root / f"{demo.session_id}.mp4"
+                    raw = self.raw_sources[demo.session_id]
+                    self.assertTrue(demo.converted_path.is_file(), f"missing browser video: {demo.converted_path}")
+                    merge_browser_video_with_original_audio(demo.converted_path, raw, archive)
+                    self.assertTrue(archive.is_file(), "import did not create an archive MP4")
+                    raw_audio = probe_audio(raw)
+                    archive_audio = probe_audio(archive)
+                    self.assertEqual(
+                        {field: archive_audio[field] for field in AUDIO_LAYOUT_FIELDS},
+                        {field: raw_audio[field] for field in AUDIO_LAYOUT_FIELDS},
+                        "archive import must not re-encode or downmix the raw Vanguard audio",
+                    )
+                    self.assertEqual(packet_hash(archive), packet_hash(raw))
+                    self.assertEqual(pcm_hash(archive), pcm_hash(raw))
 
 
 if __name__ == "__main__":  # pragma: no cover
