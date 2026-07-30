@@ -501,7 +501,10 @@ SOI = b"\xff\xd8\xff"          # JPEG start-of-image
 EOI = b"\xff\xd9"              # JPEG end-of-image
 DEFAULT_FPS = 25.0
 LIVE_START_TIMEOUT = 10.0      # device present but never produced its first frame
-LIVE_STALL_TIMEOUT = 5.0       # device stopped delivering frames without disconnecting
+# A hardware button press can leave the UVC device enumerated briefly even
+# after it stops delivering frames. Keep the frozen-frame window short; the
+# UI independently reacts to the mode change as soon as macOS reports it.
+LIVE_STALL_TIMEOUT = 1.5       # device stopped delivering frames without disconnecting
 LIVE_CAPTURE_PROFILES = (
     # Confirmed native mode for the 1b3f:2002 GENERAL - UVC firmware.
     ("1280x720@30", (
@@ -701,8 +704,12 @@ class Streamer:
         finally:
             self.live = False
             self.live_profile = None
+            self.last_live_frame_at = None
             if self.source == f"LIVE · {name}":
                 self.source = None
+            # Never leave the last camera JPEG on screen while AVFoundation
+            # tears down after the camera button switches USB modes.
+            self.clear_frame()
 
     def _capture_native(self) -> None:
         """Read interleaved JPEG/PCM packets from one native AVCaptureSession."""

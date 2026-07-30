@@ -507,7 +507,7 @@ function showCameraIdleState() {
 }
 
 $('streamImg').onerror = () => {
-  if (!streaming || reconnectTimer) return;
+  if (!streaming || reconnectTimer || cameraUiState !== 'live') return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (streaming) startStream();
@@ -521,7 +521,7 @@ async function pollStream() {
 
   const liveFrameFresh = s.last_live_frame_at &&
     (Date.now() / 1000 - s.last_live_frame_at) < 5;
-  if (!s.live || !liveFrameFresh) {
+  if (cameraUiState !== 'live' || !s.live || !liveFrameFresh) {
     showCameraIdleState();
     return;
   }
@@ -606,7 +606,9 @@ function renderStatus(s) {
   // A short hardware Record/ON-OFF press changes the camera from mounted
   // storage into GENERAL - UVC. Treat that transition as the user's intent to
   // watch live: switch tabs and reopen the MJPEG connection automatically.
-  if (liveModeKnown && !liveModeActive && s.live_available) {
+  const liveModeJustStarted = liveModeKnown && !liveModeActive && s.live_available;
+  const liveModeJustStopped = liveModeKnown && liveModeActive && !s.live_available;
+  if (liveModeJustStarted) {
     showTab('stream');
     startStream();
   }
@@ -617,6 +619,14 @@ function renderStatus(s) {
   cameraUiState = s.live_available ? 'live' : usbStorage ? 'storage' : 'disconnected';
   const cameraPresent = cameraUiState !== 'disconnected';
   $('dot').className = 'dot ' + (cameraPresent ? 'on' : 'off');
+
+  // Hide the final JPEG immediately when the camera's hardware button moves
+  // it out of UVC/live mode. Without this, the viewer waits for the capture
+  // subprocess' frame timeout and looks frozen for several seconds.
+  if (liveModeJustStopped && streaming) {
+    $('streamImg').removeAttribute('src');
+    showCameraIdleState();
+  }
 
   const parts = [];
   if (s.live_available) {
