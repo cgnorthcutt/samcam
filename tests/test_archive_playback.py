@@ -5,10 +5,41 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from starlette.requests import Request
+
+from cloud import main as relay
 from cloud.main import ArchiveStore
 
 
 class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _request() -> Request:
+        return Request({"type": "http", "method": "GET", "headers": []})
+
+    async def test_public_video_prefers_original_camera_recording(self) -> None:
+        store = ArchiveStore()
+        session_id = "Curtis-original-preferred-0001"
+        await store.start_session(
+            {"session_id": session_id, "started_at": 1_700_000_000, "source": "GENERAL - UVC"},
+            "Curtis",
+        )
+        await store.save_recording_chunk(
+            {"session_id": session_id, "index": 0, "count": 1, "size_bytes": 6}, b"legacy"
+        )
+        await store.complete_recording(session_id, 1, 6)
+        await store.save_original_recording_chunk(
+            {"session_id": session_id, "index": 0, "count": 1, "size_bytes": 8}, b"original"
+        )
+        await store.complete_original_recording(session_id, 1, 8)
+
+        previous = relay.archive
+        relay.archive = store
+        try:
+            response = await relay.archive_recording(session_id, self._request())
+        finally:
+            relay.archive = previous
+        self.assertEqual(response.body, b"original")
+
     async def test_playable_parts_remain_listed_when_full_recording_is_ready(self) -> None:
         """The browser can keep playing a part while it prepares the final MP4."""
         store = ArchiveStore()
@@ -63,20 +94,20 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="archiveVideoNext"', page)
         self.assertIn("handoffToStitchedRecording", page)
         self.assertIn("renderArchiveParts(detail)", page)
-        self.assertIn('id="archiveAudioComparison"', page)
-        self.assertIn("Original camera audio", page)
-        self.assertIn("Improved archive audio", page)
-        self.assertIn("function renderArchiveAudioComparison(detail)", page)
-        self.assertIn("/original.mp4", page)
+        self.assertIn("/archive/${encodeURIComponent(detail.session_id)}/video.mp4", page)
+        self.assertNotIn('id="archiveAudioComparison"', page)
+        self.assertNotIn("Original camera audio", page)
+        self.assertNotIn("Improved archive audio", page)
+        self.assertNotIn("renderArchiveAudioComparison", page)
 
-    def test_public_ui_never_layers_archive_ab_audio_over_video_soundtrack(self) -> None:
-        """A/B listening is exclusive: overlapping elements sound like stutter."""
+    def test_public_ui_uses_the_video_as_the_only_archive_audio_player(self) -> None:
+        """Archive playback has one source of truth: the MP4's camera track."""
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
 
-        self.assertIn("function pauseArchiveVideoSoundtrack()", page)
-        self.assertIn("function pauseArchiveComparisonAudio(except=null)", page)
-        self.assertIn("pauseArchiveVideoSoundtrack();pauseArchiveComparisonAudio(entry.player);", page)
-        self.assertIn("video.addEventListener('play',()=>pauseArchiveComparisonAudio())", page)
+        self.assertIn('id="archiveVideo" controls', page)
+        self.assertNotIn("originalArchiveAudio", page)
+        self.assertNotIn("improvedArchiveAudio", page)
+        self.assertNotIn("archiveAudioVisualizers", page)
 
     def test_public_ui_recovers_from_a_transient_archive_video_failure(self) -> None:
         """A 503 after detail success must not leave a gray 0:00 media player."""

@@ -10,7 +10,9 @@ of every session is retained under ``archives/`` as a recovery source.
 from __future__ import annotations
 
 import asyncio
+import array
 import json
+import math
 import os
 import shutil
 import signal
@@ -27,12 +29,6 @@ from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
-
-from restore_archive_audio import (
-    RestorationError,
-    installed_filters as restoration_filters_available,
-    restore as restore_archive_audio,
-)
 
 HERE = Path(__file__).resolve().parent
 LOCAL_URL = os.environ.get("SAMCAM_LOCAL_URL", "http://127.0.0.1:8011").rstrip("/")
@@ -62,18 +58,6 @@ ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
     1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
 )
-# Mastering runs only after a session ends, while stitching is already async.
-# It must never sit in the live-video or live-audio path.  The current camera
-# can have 50/60 Hz electrical hum, but notches are opt-in because applying
-# them to a clean recording can thin a voice. Set this to 50 or 60 only after
-# confirming a steady hum in the raw capture.
-ARCHIVE_AUDIO_RESTORE_ENABLED = os.environ.get("SAMCAM_ARCHIVE_AUDIO_RESTORE", "1").lower() not in {"0", "false", "no"}
-try:
-    ARCHIVE_AUDIO_MAINS_HZ = int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_MAINS_HZ", "0"))
-except ValueError:
-    ARCHIVE_AUDIO_MAINS_HZ = 0
-if ARCHIVE_AUDIO_MAINS_HZ not in {0, 50, 60}:
-    ARCHIVE_AUDIO_MAINS_HZ = 0
 RECONNECT_SECONDS = 2.0
 # A faster status heartbeat starts the public relay as soon as the laptop has
 # its first camera frame. Frame publishing itself remains continuous.
@@ -86,7 +70,11 @@ LIVE_AUDIO_FRAME_BYTES = 1_600  # 50 ms at 16 kHz mono s16le
 ARCHIVE_MAGIC = b"SCAS"
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
-ANALYTICS_SCHEMA_VERSION = 1
+ANALYTICS_SCHEMA_VERSION = 2
+AUDIO_SPECTROGRAM_RATE = 16_000
+AUDIO_SPECTROGRAM_STEPS = 96
+AUDIO_SPECTROGRAM_BINS = 32
+AUDIO_SPECTROGRAM_WINDOW = 512
 
 
 @dataclass(frozen=True)
@@ -124,6 +112,91 @@ def archive_preview_bitrate_kbps(duration_seconds: float) -> int:
     # public preview must retain sound as well as fit in one relay message.
     video_budget_kbps = max(64, relay_limit_kbps - ARCHIVE_PREVIEW_AUDIO_KBPS)
     return max(64, min(ARCHIVE_VIDEO_MAX_KBPS, video_budget_kbps))
+
+
+def audio_spectrogram_from_pcm(
+    pcm: bytes,
+    *,
+    sample_rate: int = AUDIO_SPECTROGRAM_RATE,
+    steps: int = AUDIO_SPECTROGRAM_STEPS,
+    bins: int = AUDIO_SPECTROGRAM_BINS,
+) -> dict[str, Any]:
+    """Return a compact, deterministic spectrogram for the Analytics UI.
+
+    This intentionally samples a bounded number of 512-sample windows instead
+    of returning raw audio or a heavyweight image.  It is small enough for the
+    relay JSON payload, keeps analysis on the camera laptop, and makes
+    persistent hum/screech visible without changing the saved audio.
+    """
+    samples = array.array("h")
+    samples.frombytes(pcm[:len(pcm) - len(pcm) % 2])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples or sample_rate <= 0:
+        return {"available": False}
+
+    window_size = min(AUDIO_SPECTROGRAM_WINDOW, len(samples))
+    if window_size < 16:
+        return {"available": False}
+    requested_steps = max(1, min(steps, len(samples) // max(1, window_size // 4)))
+    requested_bins = max(1, min(bins, window_size // 2 - 1))
+    window = [0.5 - 0.5 * math.cos(2 * math.pi * index / (window_size - 1)) for index in range(window_size)]
+    bin_indices = [max(1, round((index + 1) * (window_size // 2) / requested_bins)) for index in range(requested_bins)]
+    cosine = [[math.cos(2 * math.pi * bin_index * index / window_size) for index in range(window_size)] for bin_index in bin_indices]
+    sine = [[math.sin(2 * math.pi * bin_index * index / window_size) for index in range(window_size)] for bin_index in bin_indices]
+    windows: list[list[float]] = []
+    total_power = 0.0
+    high_power = 0.0
+    last_start = max(0, len(samples) - window_size)
+
+    for step in range(requested_steps):
+        start = round(last_start * step / max(1, requested_steps - 1))
+        values = [samples[start + index] / 32768.0 * window[index] for index in range(window_size)]
+        row: list[float] = []
+        for index, frequency in enumerate(bin_indices):
+            real = sum(value * cosine[index][offset] for offset, value in enumerate(values))
+            imaginary = sum(value * sine[index][offset] for offset, value in enumerate(values))
+            power = real * real + imaginary * imaginary
+            row.append(power)
+            total_power += power
+            if frequency * sample_rate / window_size >= 4_000:
+                high_power += power
+        windows.append(row)
+
+    levels = [10.0 * math.log10(max(power, 1e-18)) for row in windows for power in row]
+    ordered = sorted(levels)
+    floor = ordered[max(0, int(len(ordered) * 0.12) - 1)]
+    ceiling = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+    span = max(12.0, ceiling - floor)
+    values = [
+        [round(max(0.0, min(100.0, (10.0 * math.log10(max(power, 1e-18)) - floor) / span * 100.0))) for power in row]
+        for row in windows
+    ]
+    clipped = sum(abs(sample) >= 32_100 for sample in samples)
+    return {
+        "available": True,
+        "sample_rate": sample_rate,
+        "duration_seconds": round(len(samples) / sample_rate, 2),
+        "frequencies_hz": [round(index * sample_rate / window_size) for index in bin_indices],
+        "values": values,
+        "high_frequency_energy_percent": round(100.0 * high_power / max(total_power, 1e-18), 1),
+        "near_clip_sample_percent": round(100.0 * clipped / len(samples), 4),
+    }
+
+
+def audio_spectrogram(path: Path, ffmpeg: str) -> dict[str, Any]:
+    """Decode only the audio stream for an Analytics spectrogram."""
+    sampled = subprocess.run(
+        [
+            ffmpeg, "-v", "error", "-i", str(path), "-map", "0:a:0?", "-vn",
+            "-ac", "1", "-ar", str(AUDIO_SPECTROGRAM_RATE), "-f", "s16le", "pipe:1",
+        ],
+        capture_output=True,
+        timeout=240,
+    )
+    if sampled.returncode != 0:
+        return {"available": False}
+    return audio_spectrogram_from_pcm(sampled.stdout)
 
 
 def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +238,7 @@ def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     frame_count = len(raw) // frame_bytes
     if frame_count == 0:
         raise RuntimeError("ffmpeg returned no analyzable frames")
+    audio = audio_spectrogram(path, ffmpeg)
 
     samples: list[dict[str, float]] = []
     previous: bytes | None = None
@@ -203,6 +277,7 @@ def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         },
         "sample_fps": round(sample_fps, 4),
         "samples": samples,
+        "audio_spectrogram": audio,
         "summary": {
             "average_motion": round(sum(sample["motion"] for sample in motion_samples) / len(motion_samples), 1),
             "peak_motion_p95": motions[p95_index],
@@ -221,6 +296,7 @@ def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         },
         "method": {
             "video_derived": ["video duration", "sampled frame luminance", "sampled frame-to-frame motion"],
+            "audio_derived": ["sampled spectral energy", "high-frequency energy share", "near-clip sample share"],
             "model_assumptions": ["lighting quality favors mid-range luminance", "capture index weights lighting 55% and stability 45%"],
             "estimated": ["battery remaining and ETA", "effective worn load and neck torque", "ergonomic and market-fit scores"],
             "limitations": ["battery values are listing-based estimates, not telemetry", "motion is a frame-difference index, not physical acceleration", "ergonomic and suitability scores are unvalidated scenario models"],
@@ -273,7 +349,7 @@ class SessionArchiver:
 
     @staticmethod
     def _original_recording_path(session_dir: Path) -> Path:
-        """The unmastered stitched camera recording kept for A/B comparison."""
+        """The unmodified stitched camera recording used by public playback."""
         return session_dir / "recording.original.mp4"
 
     @staticmethod
@@ -288,6 +364,14 @@ class SessionArchiver:
     @staticmethod
     def _analytics_path(session_dir: Path) -> Path:
         return session_dir / "analytics.json"
+
+    @staticmethod
+    def _analytics_is_current(path: Path) -> bool:
+        try:
+            payload = json.loads(path.read_text())
+            return int(payload.get("schema_version", 0)) >= ANALYTICS_SCHEMA_VERSION
+        except (OSError, TypeError, ValueError):
+            return False
 
     def _write_metadata(self, session_dir: Path, metadata: dict[str, Any]) -> None:
         target = self._metadata_path(session_dir)
@@ -573,35 +657,12 @@ class SessionArchiver:
     def _ffconcat_path(path: Path) -> str:
         return "'" + str(path.resolve()).replace("'", r"'\''") + "'"
 
-    @staticmethod
-    def _master_recording_audio(source: Path, destination: Path) -> None:
-        """Create the final speech-first MP4 without touching the live path.
-
-        ``source`` is the retained, unmastered stitched MP4. The restoration
-        helper leaves healthy stereo sources intact and repairs only eligible
-        low-rate body-camera audio before atomically producing ``destination``.
-        """
-        ffmpeg = shutil.which("ffmpeg")
-        ffprobe = shutil.which("ffprobe")
-        if ffmpeg is None or ffprobe is None:
-            raise RestorationError("ffmpeg and ffprobe are required for archive audio mastering")
-        restore_archive_audio(
-            source,
-            destination,
-            ffmpeg=ffmpeg,
-            ffprobe=ffprobe,
-            available_filters=restoration_filters_available(ffmpeg),
-            mains_hz=ARCHIVE_AUDIO_MAINS_HZ,
-            overwrite=True,
-        )
-
     def _stitch_recording(self, metadata: dict[str, Any]) -> None:
         session_id = str(metadata["session_id"])
         session_dir = self.root / session_id
         output = self._recording_path(session_dir)
         original = self._original_recording_path(session_dir)
         temporary = output.with_name(f"{output.stem}.part{output.suffix}")
-        mastered_temporary = output.with_name(f"{output.stem}.mastered.part{output.suffix}")
         manifest = session_dir / ".recording.ffconcat"
         try:
             if (
@@ -629,24 +690,11 @@ class SessionArchiver:
             if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
                 detail = completed.stderr.decode(errors="replace").strip()[-500:]
                 raise RuntimeError(detail or "ffmpeg did not create a stitched recording")
-            # Keep the raw camera capture before any post-processing. This is
-            # intentionally a full MP4 (not just extracted audio) so Archive
-            # can provide an honest time-aligned before/after listener.
+            # This is the final archive recording.  Preserve the stitched
+            # camera MP4 byte-for-byte rather than applying an offline audio
+            # pass: Archive playback must use the camera's original signal.
             temporary.replace(original)
-            if not ARCHIVE_AUDIO_RESTORE_ENABLED:
-                shutil.copyfile(original, output)
-            else:
-                try:
-                    self._master_recording_audio(original, mastered_temporary)
-                    mastered_temporary.replace(output)
-                except RestorationError as exc:
-                    # Archive availability wins if an optional offline repair
-                    # dependency is unavailable. The original stitched copy
-                    # still has camera audio and can be restored later.
-                    with self.lock:
-                        self.errors.append(f"archive audio master {session_id}: {exc}"[-600:])
-                        del self.errors[:-10]
-                    shutil.copyfile(original, output)
+            shutil.copyfile(original, output)
         except Exception as exc:  # noqa: BLE001 - individual archive recovery must not stop live publishing
             with self.lock:
                 self.errors.append(f"archive recording {session_id}: {exc}"[-600:])
@@ -660,7 +708,6 @@ class SessionArchiver:
         finally:
             manifest.unlink(missing_ok=True)
             temporary.unlink(missing_ok=True)
-            mastered_temporary.unlink(missing_ok=True)
             with self.lock:
                 self.stitching.pop(session_id, None)
                 if output.exists() and output.stat().st_size > 0:
@@ -700,7 +747,7 @@ class SessionArchiver:
         analytics_path = self._analytics_path(session_dir)
         temporary = analytics_path.with_name(f"{analytics_path.name}.part")
         try:
-            if analytics_path.exists() and analytics_path.stat().st_size > 0:
+            if self._analytics_is_current(analytics_path):
                 return
             if not output.exists() or output.stat().st_size <= 0:
                 return
@@ -723,7 +770,7 @@ class SessionArchiver:
         analytics_path = self._analytics_path(session_dir)
         if (
             session_id in self.analyzing
-            or (analytics_path.exists() and analytics_path.stat().st_size > 0)
+            or self._analytics_is_current(analytics_path)
             or not output.exists()
             or output.stat().st_size <= 0
         ):
@@ -928,12 +975,12 @@ class SessionArchiver:
                 continue
             session_id = str(metadata["session_id"])
             session_dir = self.root / session_id
-            # Keep the enhanced MP4 as the primary Archive player. Its raw
-            # counterpart is uploaded immediately after and powers A/B audio
-            # comparison without delaying ordinary archive playback.
+            # Publish the unmodified camera recording first. The regular
+            # object remains a compatibility copy for the archive protocol;
+            # public playback explicitly prefers this original variant.
             for variant, path in (
-                ("improved", self._recording_path(session_dir)),
                 ("original", self._original_recording_path(session_dir)),
+                ("improved", self._recording_path(session_dir)),
             ):
                 try:
                     size_bytes = path.stat().st_size

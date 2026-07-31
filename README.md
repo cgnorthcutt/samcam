@@ -145,13 +145,13 @@ While a session is active or just ended:
 - Parts close roughly every **five minutes** by default
   (`SAMCAM_ARCHIVE_SEGMENT_SECONDS=300`). They can appear as playable parts
   before the full session is ready.
-- A background job stitches finished parts into an unmastered **original** MP4,
-  then creates a separate offline-improved **archive** MP4. It does not block
-  part playback; the browser can switch to the final recording once it arrives.
-- Archive shows both tracks in an **Audio A/B comparison** panel: the original
-  camera capture and the improved archive audio each have their own listener
-  and live waveform viewer. The enhanced MP4 remains the primary video player.
-- The publisher uploads both completed MP4s in durable chunks, plus the
+- A background job stitches finished parts into one final MP4 without changing
+  its camera audio. It does not block part playback; the browser can switch to
+  the final recording once it arrives.
+- Archive has one audio source: the original camera track embedded in that
+  final MP4. A duplicate compatibility object is retained only so older upload
+  states can fall back safely, not for a second player or processing pass.
+- The publisher uploads the completed MP4, plus the
   accepted transcript and analytics. Allow this to finish before turning off
   the laptop if the new recording must be available publicly.
 
@@ -181,31 +181,12 @@ combine those measurements with stated product assumptions. These are planning
 estimates—not device telemetry, medical guidance, market research, or measured
 biomechanics.
 
-### Archive audio mastering and restoration
+### Optional archive-audio restoration
 
-Live sound is intentionally optimized for low latency and feedback safety. For
-a newly finished session, the publisher retains the unmodified stitched camera
-MP4, then makes an offline-only audio decision for a second, improved MP4;
-this never delays Live or the playable archive parts. Healthy full-bandwidth
-stereo audio (at least
-44.1 kHz, two channels, and 80 kb/s) is packet-remuxed with `-c:a copy` and
-verified against the source AAC packet hashes—no filters, downmixing, resample,
-normalization, or re-encode. The known low-rate mono USB body-camera profile
-uses the speech-mastering path below. If an optional repair dependency is
-unavailable, the publisher falls back to a valid stitched MP4.
-
-The automatic profile is enabled by default and can be configured without
-touching live audio:
-
-```bash
-SAMCAM_ARCHIVE_AUDIO_RESTORE=1 \
-SAMCAM_ARCHIVE_AUDIO_MAINS_HZ=60 \
-.venv/bin/python publish_worker.py
-```
-
-`60` removes the 120/180 Hz harmonics of the hum measured on this US demo
-camera. Use `50` where appropriate or `0` when there is no clearly audible
-electrical hum.
+The final public archive always keeps the original camera audio. Live sound is
+also deliberately separate from offline work. For a private,
+presentation-only export, the helper below can create a second MP4 without
+changing the recording SamCam serves.
 
 For a historical MP4 that needs a cleaner, presentation-ready speech track,
 use the helper below on the worker laptop. It preserves the source file and
@@ -234,20 +215,9 @@ video with the original 48 kHz stereo AAC packets stream-copied from the device
 MOVs. Run `.venv/bin/python import_demo_archives.py --replace-media` when those
 private originals are present locally to refresh the demos, and see
 [`docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md`](docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md)
-for the packet/PCM regression contract.
-
-To replace the matching public archive MP4 without disturbing the Curtis Live
-worker, run the separate maintenance uploader after the output validates:
-
-```bash
-SAMCAM_RELAY_URL=https://samcam.app \
-  .venv/bin/python republish_archive_recording.py SESSION_ID \
-  archives/SESSION_ID/recording.mastered.mp4
-```
-
-Run its `--dry-run` first. The uploader uses a distinct maintenance WebSocket,
-uploads only the finished MP4 chunks, and leaves the Live camera connection
-untouched.
+for the packet/PCM regression contract. Do not replace a public archive MP4
+with a restored export: public SamCam playback deliberately stays on the
+camera's original soundtrack.
 
 ## Expected public states
 

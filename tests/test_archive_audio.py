@@ -101,18 +101,21 @@ class ArchiveAudioTests(unittest.TestCase):
             self.assertTrue(original_recording.exists())
             self.assertIn(("audio", "aac"), self._probe_streams(recording))
             self.assertIn(("audio", "aac"), self._probe_streams(original_recording))
-            # The A/B source remains the unmastered concat output. The raw
-            # body-camera AAC is 16 kHz mono while the primary archive MP4 is
-            # the separately mastered, 48 kHz playback version.
+            # The archive keeps the camera track unmodified. Both object
+            # names intentionally resolve to the same AAC layout for legacy
+            # relay compatibility.
             original_audio = self._probe_audio(original_recording)
             self.assertEqual(original_audio["sample_rate"], "16000")
             self.assertEqual(original_audio["channels"], 1)
-            # The final MP4, unlike a relay-safe preview, is mastered after
-            # stitching: it preserves copied video and uses 48 kHz AAC audio.
-            mastered_audio = self._probe_audio(recording)
-            self.assertEqual(mastered_audio["codec_name"], "aac")
-            self.assertEqual(mastered_audio["sample_rate"], "48000", archiver.errors)
-            self.assertEqual(mastered_audio["channels"], 1)
+            final_audio = self._probe_audio(recording)
+            self.assertEqual(final_audio["codec_name"], "aac")
+            self.assertEqual(final_audio["sample_rate"], "16000", archiver.errors)
+            self.assertEqual(final_audio["channels"], 1)
+            self.assertEqual(recording.read_bytes(), original_recording.read_bytes())
+            # Stitching schedules the non-blocking Analytics sidecar. Wait
+            # before TemporaryDirectory cleanup so that worker cannot race a
+            # removed session directory.
+            archiver.wait_for_encoding(timeout=30)
 
     def test_live_pcm_is_written_with_the_active_part_before_encoding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -128,6 +131,7 @@ class ArchiveAudioTests(unittest.TestCase):
                 self.assertEqual(raw_audio.read_bytes()[-len(pcm):], pcm)
             finally:
                 archiver.stop()
+                archiver.wait_for_encoding(timeout=30)
 
     def test_delayed_audio_arrival_never_inserts_mid_recording_silence(self) -> None:
         """Network bursts are not a reason to cut a hole in a spoken sentence."""
@@ -148,6 +152,7 @@ class ArchiveAudioTests(unittest.TestCase):
                 self.assertEqual(raw_audio.read_bytes(), pcm)
             finally:
                 archiver.stop()
+                archiver.wait_for_encoding(timeout=30)
 
 
 if __name__ == "__main__":  # pragma: no cover

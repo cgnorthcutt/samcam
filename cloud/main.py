@@ -464,7 +464,7 @@ class ArchiveStore:
             await self._mark_database_unavailable(message)
 
     async def save_recording_chunk(self, metadata: dict[str, Any], data: bytes) -> None:
-        """Save one byte range of the offline-improved MP4 recording."""
+        """Save one byte range of the primary archive MP4 recording."""
         await self._save_recording_chunk(metadata, data, original=False)
 
     async def save_original_recording_chunk(self, metadata: dict[str, Any], data: bytes) -> None:
@@ -538,7 +538,7 @@ class ArchiveStore:
             await self._mark_database_unavailable(message)
 
     async def complete_recording(self, session_id: str, chunk_count: int, size_bytes: int) -> None:
-        """Mark the offline-improved recording as complete after all chunks arrive."""
+        """Mark the primary archive recording as complete after all chunks arrive."""
         await self._complete_recording(session_id, chunk_count, size_bytes, original=False)
 
     async def complete_original_recording(self, session_id: str, chunk_count: int, size_bytes: int) -> None:
@@ -700,11 +700,11 @@ class ArchiveStore:
             raise ArchiveUnavailable(message) from exc
 
     async def recording(self, session_id: str) -> dict[str, Any] | None:
-        """Return the offline-improved archive MP4."""
+        """Return the legacy primary archive MP4 when no original is available."""
         return await self._recording(session_id, original=False)
 
     async def original_recording(self, session_id: str) -> dict[str, Any] | None:
-        """Return the unmastered camera MP4 retained for A/B comparison."""
+        """Return the preferred, unmodified camera MP4."""
         return await self._recording(session_id, original=True)
 
     async def save_transcript(self, session_id: str, line: dict[str, Any]) -> None:
@@ -1396,10 +1396,20 @@ async def archive_segment(session_id: str, sequence: int) -> Response:
 
 
 async def archive_recording_response(
-    session_id: str, request: Request, *, original: bool = False
+    session_id: str, request: Request, *, original: bool = False, prefer_original: bool = False
 ) -> Response:
     try:
-        recording = await (archive.original_recording(session_id) if original else archive.recording(session_id))
+        if original:
+            recording = await archive.original_recording(session_id)
+        elif prefer_original:
+            # New sessions upload an unmodified copy as their public archive.
+            # Existing sessions may only have the older primary object, so
+            # retain that as a playback fallback instead of returning a 404.
+            recording = await archive.original_recording(session_id)
+            if recording is None:
+                recording = await archive.recording(session_id)
+        else:
+            recording = await archive.recording(session_id)
     except ArchiveUnavailable as exc:
         raise HTTPException(
             status_code=503,
@@ -1413,7 +1423,7 @@ async def archive_recording_response(
         raise HTTPException(status_code=404, detail=detail)
     data = recording["data"]
     total = len(data)
-    # A recording can be upgraded from playable parts to a stitched/mastered
+    # A recording can be upgraded from playable parts to a stitched
     # final MP4 under the same stable archive URL. Do not let a browser retain
     # an older byte range indefinitely after that atomic replacement.
     headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
@@ -1443,13 +1453,13 @@ async def archive_recording_response(
 
 @app.get("/archive/{session_id}/video.mp4")
 async def archive_recording(session_id: str, request: Request) -> Response:
-    """Primary offline-improved archive MP4."""
-    return await archive_recording_response(session_id, request, original=False)
+    """Preferred unmodified camera MP4, with a legacy playback fallback."""
+    return await archive_recording_response(session_id, request, prefer_original=True)
 
 
 @app.get("/archive/{session_id}/original.mp4")
 async def archive_original_recording(session_id: str, request: Request) -> Response:
-    """Unmastered camera MP4 retained for Archive A/B listening."""
+    """Unmodified camera MP4 retained for compatibility."""
     return await archive_recording_response(session_id, request, original=True)
 
 

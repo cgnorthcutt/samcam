@@ -85,8 +85,8 @@ watching a critical live feed.
 - Archive deletion creates a durable tombstone, preventing an offline
   publisher’s local recovery copy from restoring a deleted session.
 - Local audio is saved alongside each archive part and muxed to AAC. Finished
-  sessions retain an unmastered original MP4 plus a separate improved archive
-  MP4, which the Archive A/B listener presents side by side.
+  sessions preserve that original camera track in the final archive MP4; there
+  is no automatic offline audio substitution in public playback.
 - The transcription pipeline rejects repeated phrases, character stutters, and
   implausibly long text before it reaches live or archived views.
 
