@@ -54,14 +54,21 @@ class RestoreArchiveAudioTests(unittest.TestCase):
         )
         self.assertEqual(parsed, {"adeclick", "aresample", "afftdn"})
 
-    def test_speech_safe_chain_includes_supported_repairs_and_safe_band_limits(self) -> None:
+    def test_speech_safe_chain_uses_gentle_band_limits_by_default(self) -> None:
         chain, enabled = restoration_filters(ALL_FILTERS)
         self.assertIn("aresample=48000", chain)
-        self.assertIn("highpass=f=75", chain)
-        self.assertIn("lowpass=f=7200", chain)
+        self.assertIn("highpass=f=100", chain)
+        self.assertIn("lowpass=f=6000", chain)
+        self.assertNotIn("adeclick", chain)
+        self.assertNotIn("adeclip", chain)
+        self.assertNotIn("afftdn", chain)
+        self.assertEqual(enabled, ())
+
+    def test_optional_repairs_require_an_explicit_opt_in(self) -> None:
+        chain, enabled = restoration_filters(ALL_FILTERS, repair_clicks=True, denoise=True)
         self.assertIn("adeclick", chain)
         self.assertIn("adeclip", chain)
-        self.assertIn("afftdn", chain)
+        self.assertIn("afftdn=nr=4", chain)
         self.assertEqual(enabled, ("adeclick", "adeclip", "afftdn"))
 
     def test_hum_notches_are_opt_in_and_deterministic(self) -> None:

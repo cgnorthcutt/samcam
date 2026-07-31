@@ -14,7 +14,9 @@ packet instead:
 
 * SoX-quality resampling to 48 kHz (when the installed FFmpeg supports it)
 * high/low pass filtering to remove rumble and ultrasonic/screechy content
-* de-clicking/de-clipping and FFT denoising when those filters are available
+* a gentle speech band-pass and loudness pass by default
+* optional de-clicking/de-clipping and FFT denoising only when explicitly
+  requested for a recording that actually has those defects
 * two-pass EBU R128 loudness normalization and a final true-peak limiter
 * AAC-LC remux while copying every video stream without re-encoding it
 
@@ -155,8 +157,8 @@ def restoration_filters(
     available: Iterable[str],
     *,
     mains_hz: int = 0,
-    repair_clicks: bool = True,
-    denoise: bool = True,
+    repair_clicks: bool = False,
+    denoise: bool = False,
 ) -> tuple[str, tuple[str, ...]]:
     """Return a conservative, deterministic filter chain.
 
@@ -173,14 +175,16 @@ def restoration_filters(
     if mains_hz not in (0, 50, 60):
         raise RestorationError("--mains-hz must be 0, 50, or 60")
 
-    # A 75 Hz high-pass safely removes DC/handling rumble and the fundamental
-    # of mains hum without aggressively cutting normal speech.  7.2 kHz keeps
-    # useful consonant detail from the camera's 16 kHz capture while removing
-    # the high-frequency feedback/screech that listeners reported.
+    # This is purposefully a *gentle* default.  The camera's 16 kHz mono AAC
+    # audio has already discarded frequencies above 8 kHz; applying adaptive
+    # denoisers or declippers blindly to it can create the metallic/crackly
+    # artifacts they are meant to solve.  Removing sub-speech rumble and the
+    # harsh upper band makes the track more intelligible without attempting to
+    # invent fidelity that is not present in the original capture.
     chain = [
         "aresample=48000:resampler=soxr:precision=28:cheby=1",
-        "highpass=f=75:p=2",
-        "lowpass=f=7200:p=2",
+        "highpass=f=100:p=2",
+        "lowpass=f=6000:p=2",
     ]
     enabled: list[str] = []
 
@@ -198,14 +202,14 @@ def restoration_filters(
         chain.append("adeclick=w=55:o=75:a=2:t=2")
         enabled.append("adeclick")
     if repair_clicks and "adeclip" in available_set:
-        # Only repairs obviously clipped peaks; it is not used as a blanket
-        # distortion effect.
+        # This is intentionally opt-in: de-clipping can add audible harmonic
+        # distortion to a low-bitrate speech track that was never clipped.
         chain.append("adeclip=w=55:o=75:a=8:t=10")
         enabled.append("adeclip")
     if denoise and "afftdn" in available_set:
-        # Moderate adaptive reduction avoids the metallic artifacts that much
-        # stronger FFT denoisers can introduce in a close-mic spoken voice.
-        chain.append("afftdn=nr=8:nf=-42:tn=1:gs=6")
+        # Only use on a confirmed steady-noise recording.  Even modest
+        # adaptive denoising can create warble on 16 kHz AAC speech.
+        chain.append("afftdn=nr=4:nf=-42:tn=1:gs=4")
         enabled.append("afftdn")
 
     return ",".join(chain), tuple(enabled)
@@ -601,8 +605,8 @@ def restore(
     ffprobe: str,
     available_filters: Iterable[str],
     mains_hz: int = 0,
-    repair_clicks: bool = True,
-    denoise: bool = True,
+    repair_clicks: bool = False,
+    denoise: bool = False,
     overwrite: bool = False,
 ) -> str:
     """Restore ``source`` to ``destination`` and return its final state.
@@ -698,8 +702,8 @@ def parser() -> argparse.ArgumentParser:
     argument_parser.add_argument("source", type=Path, help="source MP4 whose video must remain unchanged")
     argument_parser.add_argument("-o", "--output", type=Path, help="restored MP4 path (default: SOURCE.restored.mp4)")
     argument_parser.add_argument("--mains-hz", type=int, choices=(0, 50, 60), default=0, help="add optional 50/60 Hz hum harmonic notches")
-    argument_parser.add_argument("--no-decrackle", action="store_true", help="disable adeclick/adeclip even when FFmpeg provides them")
-    argument_parser.add_argument("--no-denoise", action="store_true", help="disable adaptive FFT denoising")
+    argument_parser.add_argument("--repair-clicks", action="store_true", help="opt in to adeclick/adeclip for a recording with confirmed click/clipping defects")
+    argument_parser.add_argument("--denoise", action="store_true", help="opt in to gentle adaptive FFT denoising for a recording with confirmed steady noise")
     argument_parser.add_argument("--overwrite", action="store_true", help="atomically replace an existing restored output after validation")
     argument_parser.add_argument("--dry-run", action="store_true", help="print the selected pipeline and commands without processing media")
     return argument_parser
@@ -730,8 +734,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     destination,
                     available_filters=available,
                     mains_hz=args.mains_hz,
-                    repair_clicks=not args.no_decrackle,
-                    denoise=not args.no_denoise,
+                    repair_clicks=args.repair_clicks,
+                    denoise=args.denoise,
                 )
                 details.update({
                     "mains_hz": plan.mains_hz,
@@ -760,8 +764,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ffprobe=ffprobe,
             available_filters=available,
             mains_hz=args.mains_hz,
-            repair_clicks=not args.no_decrackle,
-            denoise=not args.no_denoise,
+            repair_clicks=args.repair_clicks,
+            denoise=args.denoise,
             overwrite=args.overwrite,
         )
         source_probe = probe_media(ffprobe, source)

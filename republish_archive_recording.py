@@ -2,9 +2,10 @@
 """Safely replace one completed public archive MP4 without touching Live.
 
 The normal publisher owns the Curtis live WebSocket.  This maintenance tool
-uses a separate worker identity and sends only the durable stitched-recording
-chunks, so it cannot blank or interrupt the live camera.  It is useful after
-running ``restore_archive_audio.py`` on an already archived recording.
+uses a separate worker identity and sends only durable archived-recording
+chunks, so it cannot blank or interrupt the live camera. It can replace the
+primary improved MP4 or backfill the retained original MP4 used by Archive's
+audio A/B comparison.
 
 Example:
 
@@ -35,6 +36,7 @@ MAINTENANCE_WORKER = (
     or "SamCamArchiveMaintenance"
 )
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
+ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
 ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{3,127}$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$")
@@ -47,6 +49,7 @@ class RecordingChunk:
     count: int
     size_bytes: int
     data: bytes
+    variant: str = "improved"
 
 
 def relay_websocket_url(worker: str, relay_url: str = RELAY_URL) -> str:
@@ -64,7 +67,14 @@ def validate_session_id(value: str) -> str:
     return session_id
 
 
-def recording_chunks(session_id: str, path: Path) -> list[RecordingChunk]:
+def recording_chunks(
+    session_id: str,
+    path: Path,
+    *,
+    variant: str = "improved",
+) -> list[RecordingChunk]:
+    if variant not in {"improved", "original"}:
+        raise ValueError("recording variant must be improved or original")
     source = path.expanduser().resolve()
     if not source.is_file():
         raise ValueError(f"recording is missing: {source}")
@@ -78,14 +88,15 @@ def recording_chunks(session_id: str, path: Path) -> list[RecordingChunk]:
             data = handle.read(ARCHIVE_RECORDING_CHUNK_BYTES)
             if not data:
                 raise ValueError(f"recording ended before chunk {index}")
-            chunks.append(RecordingChunk(session_id, index, count, size_bytes, data))
+            chunks.append(RecordingChunk(session_id, index, count, size_bytes, data, variant))
     return chunks
 
 
 def chunk_envelope(chunk: RecordingChunk) -> bytes:
+    original = chunk.variant == "original"
     metadata = json.dumps(
         {
-            "type": "archive_recording_chunk",
+            "type": "archive_original_recording_chunk" if original else "archive_recording_chunk",
             "session_id": chunk.session_id,
             "index": chunk.index,
             "count": chunk.count,
@@ -93,11 +104,19 @@ def chunk_envelope(chunk: RecordingChunk) -> bytes:
         },
         separators=(",", ":"),
     ).encode()
-    return ARCHIVE_RECORDING_MAGIC + len(metadata).to_bytes(4, "big") + metadata + chunk.data
+    magic = ARCHIVE_ORIGINAL_RECORDING_MAGIC if original else ARCHIVE_RECORDING_MAGIC
+    return magic + len(metadata).to_bytes(4, "big") + metadata + chunk.data
 
 
-async def republish(session_id: str, path: Path, worker: str, relay_url: str = RELAY_URL) -> None:
-    chunks = recording_chunks(session_id, path)
+async def republish(
+    session_id: str,
+    path: Path,
+    worker: str,
+    relay_url: str = RELAY_URL,
+    *,
+    variant: str = "improved",
+) -> None:
+    chunks = recording_chunks(session_id, path, variant=variant)
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=None)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.ws_connect(relay_websocket_url(worker, relay_url), heartbeat=20, autoping=True) as websocket:
@@ -106,7 +125,7 @@ async def republish(session_id: str, path: Path, worker: str, relay_url: str = R
                 print(f"Uploaded archive chunk {chunk.index + 1}/{chunk.count}")
             await websocket.send_json(
                 {
-                    "type": "archive_recording_complete",
+                    "type": "archive_original_recording_complete" if variant == "original" else "archive_recording_complete",
                     "session_id": session_id,
                     "chunk_count": chunks[0].count,
                     "size_bytes": chunks[0].size_bytes,
@@ -121,6 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session_id", help="existing public archive session ID")
     parser.add_argument("recording", type=Path, help="validated mastered MP4 to upload")
+    parser.add_argument("--variant", choices=("improved", "original"), default="improved", help="archive variant to upload (default: improved)")
     parser.add_argument("--worker", default=MAINTENANCE_WORKER, help="maintenance WebSocket identity")
     parser.add_argument("--dry-run", action="store_true", help="validate and print the upload plan without connecting")
     return parser.parse_args()
@@ -133,15 +153,15 @@ def main() -> int:
         worker = args.worker.strip()
         if not WORKER_NAME.fullmatch(worker):
             raise ValueError(f"invalid maintenance worker: {args.worker!r}")
-        chunks = recording_chunks(session_id, args.recording)
+        chunks = recording_chunks(session_id, args.recording, variant=args.variant)
         if args.dry_run:
             print(
-                f"Would replace {session_id} with {len(chunks)} chunk(s), "
+                f"Would upload the {args.variant} recording for {session_id} with {len(chunks)} chunk(s), "
                 f"{chunks[0].size_bytes} bytes, via {relay_websocket_url(worker)}"
             )
             return 0
-        asyncio.run(republish(session_id, args.recording, worker))
-        print(f"Completed public archive replacement: {session_id}")
+        asyncio.run(republish(session_id, args.recording, worker, variant=args.variant))
+        print(f"Completed public archive {args.variant} upload: {session_id}")
     except (ValueError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
         print(f"Archive recording replacement failed: {exc}", file=sys.stderr)
         return 1

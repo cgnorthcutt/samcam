@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from republish_archive_recording import (
+    ARCHIVE_ORIGINAL_RECORDING_MAGIC,
     ARCHIVE_RECORDING_MAGIC,
     chunk_envelope,
     recording_chunks,
@@ -36,6 +37,17 @@ class RepublishArchiveRecordingTests(unittest.TestCase):
             relay_websocket_url("Archive Repair", "https://samcam.app"),
             "wss://samcam.app/ws/worker/Archive%20Repair",
         )
+
+    def test_original_variant_uses_the_distinct_durable_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            recording = Path(temporary) / "recording.original.mp4"
+            recording.write_bytes(b"original-camera-bytes")
+            chunk = recording_chunks("Curtis-repair-0001", recording, variant="original")[0]
+            envelope = chunk_envelope(chunk)
+            self.assertTrue(envelope.startswith(ARCHIVE_ORIGINAL_RECORDING_MAGIC))
+            header_size = int.from_bytes(envelope[4:8], "big")
+            header = json.loads(envelope[8:8 + header_size])
+            self.assertEqual(header["type"], "archive_original_recording_chunk")
 
     def test_only_relay_compatible_session_ids_are_accepted(self) -> None:
         self.assertEqual(validate_session_id("Curtis-repair-0001"), "Curtis-repair-0001")
