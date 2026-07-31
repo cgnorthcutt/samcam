@@ -871,11 +871,15 @@ class Streamer:
                     self._capture_native()
                     return
                 except RuntimeError as exc:
-                    # The native path is specifically here to avoid repeatedly
-                    # opening this fragile camera through FFmpeg after a stall.
-                    # Release it fully, back off, and let the next reconnect use
-                    # a fresh AVCaptureSession.
-                    raise RuntimeError(f"native AVFoundation: {exc}") from exc
+                    # The native helper normally gives the cleanest unified
+                    # video/audio capture. Some UVC reconnects, however,
+                    # deliver PCM while never yielding the first video frame.
+                    # Its ``finally`` block has released the helper by now, so
+                    # immediately try the known AVFoundation/FFmpeg profiles
+                    # rather than flashing the macOS camera indicator forever
+                    # with no public video. This stays scoped to the same
+                    # verified GENERAL-UVC selector.
+                    failures.append(f"native AVFoundation: {exc}")
 
             for label, input_options in LIVE_CAPTURE_PROFILES:
                 if not self._capture_needed() or find_live_camera() is None:

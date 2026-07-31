@@ -57,6 +57,15 @@ class FinalDemoContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("archive:\"reconnecting\"", checklist)
         self.assertIn("Worker Curtis is not streaming at this time", checklist)
 
+    def test_native_camera_stall_falls_back_to_verified_ffmpeg_profiles(self) -> None:
+        """A UVC helper that yields audio but no frames must not strand Live."""
+        server = (ROOT / "server.py").read_text()
+        start = server.index("if NATIVE_CAPTURE.exists()")
+        end = server.index("for label, input_options in LIVE_CAPTURE_PROFILES")
+        native_block = server[start:end]
+        self.assertIn('failures.append(f"native AVFoundation:', native_block)
+        self.assertNotIn('raise RuntimeError(f"native AVFoundation:', native_block)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
