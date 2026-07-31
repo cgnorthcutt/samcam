@@ -64,15 +64,16 @@ ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
 )
 # Mastering runs only after a session ends, while stitching is already async.
 # It must never sit in the live-video or live-audio path.  The current camera
-# picked up 60 Hz electrical hum, so the US default removes its harmonics; set
-# this to 0 (or 50) for a different environment.
+# can have 50/60 Hz electrical hum, but notches are opt-in because applying
+# them to a clean recording can thin a voice. Set this to 50 or 60 only after
+# confirming a steady hum in the raw capture.
 ARCHIVE_AUDIO_RESTORE_ENABLED = os.environ.get("SAMCAM_ARCHIVE_AUDIO_RESTORE", "1").lower() not in {"0", "false", "no"}
 try:
-    ARCHIVE_AUDIO_MAINS_HZ = int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_MAINS_HZ", "60"))
+    ARCHIVE_AUDIO_MAINS_HZ = int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_MAINS_HZ", "0"))
 except ValueError:
-    ARCHIVE_AUDIO_MAINS_HZ = 60
+    ARCHIVE_AUDIO_MAINS_HZ = 0
 if ARCHIVE_AUDIO_MAINS_HZ not in {0, 50, 60}:
-    ARCHIVE_AUDIO_MAINS_HZ = 60
+    ARCHIVE_AUDIO_MAINS_HZ = 0
 RECONNECT_SECONDS = 2.0
 # A faster status heartbeat starts the public relay as soon as the laptop has
 # its first camera frame. Frame publishing itself remains continuous.
@@ -786,11 +787,14 @@ class SessionArchiver:
     def write_audio(self, pcm: bytes) -> None:
         """Persist camera PCM next to the active JPEG segment.
 
-        The publisher receives 50 ms packets from the same local capture
-        session as the frames.  We put a short zero-filled gap in front of a
-        late first packet, then normalize the tail when the video part closes.
-        This keeps audio and video close in time without ever slowing the live
-        relay or the transcription path.
+        The publisher receives ordered PCM from the one local camera session.
+        Arrival time is *not* a capture timestamp: HTTP/WebSocket scheduling
+        can deliver several 50 ms packets together.  Writing a gap whenever a
+        packet happens to arrive late creates audible cuts in the middle of a
+        sentence, so archive audio always follows its own sample clock here.
+        At segment close, ``_normalize_segment_audio`` may add a silent tail
+        (or trim only a tail) to match video duration.  It never inserts
+        silence between received samples.
         """
         if len(pcm) % 2:
             pcm = pcm[:-1]
@@ -799,22 +803,6 @@ class SessionArchiver:
         with self.lock:
             if self.active_audio is None or self.active_segment_started_at is None:
                 return
-            packet_seconds = len(pcm) / ARCHIVE_AUDIO_BYTES_PER_SECOND
-            packet_started_at = max(
-                self.active_segment_started_at,
-                time.time() - packet_seconds,
-            )
-            expected_bytes = int(
-                (packet_started_at - self.active_segment_started_at)
-                * ARCHIVE_AUDIO_BYTES_PER_SECOND
-            )
-            expected_bytes -= expected_bytes % 2
-            if expected_bytes > self.active_segment_audio_bytes:
-                self._write_silence(
-                    self.active_audio,
-                    expected_bytes - self.active_segment_audio_bytes,
-                )
-                self.active_segment_audio_bytes = expected_bytes
             self.active_audio.write(pcm)
             self.active_segment_audio_bytes += len(pcm)
 

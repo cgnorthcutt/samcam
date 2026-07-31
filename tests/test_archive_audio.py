@@ -129,6 +129,26 @@ class ArchiveAudioTests(unittest.TestCase):
             finally:
                 archiver.stop()
 
+    def test_delayed_audio_arrival_never_inserts_mid_recording_silence(self) -> None:
+        """Network bursts are not a reason to cut a hole in a spoken sentence."""
+        with tempfile.TemporaryDirectory() as temporary:
+            archiver = SessionArchiver(Path(temporary))
+            session = archiver.start("Curtis", "LIVE · GENERAL - UVC")
+            try:
+                assert archiver.active_segment_started_at is not None
+                # Simulate a packet delayed in HTTP scheduling. Its PCM must
+                # remain contiguous rather than being preceded by fabricated
+                # wall-clock silence.
+                archiver.active_segment_started_at -= 2.0
+                pcm = b"\x10\x00" * 800
+                archiver.write_audio(pcm)
+                assert archiver.active_audio is not None
+                archiver.active_audio.flush()
+                raw_audio = Path(temporary) / session["session_id"] / "segment-00000.s16le"
+                self.assertEqual(raw_audio.read_bytes(), pcm)
+            finally:
+                archiver.stop()
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
