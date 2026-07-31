@@ -69,13 +69,22 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function renderArchiveAudioComparison(detail)", page)
         self.assertIn("/original.mp4", page)
 
+    def test_public_ui_never_layers_archive_ab_audio_over_video_soundtrack(self) -> None:
+        """A/B listening is exclusive: overlapping elements sound like stutter."""
+        page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
+
+        self.assertIn("function pauseArchiveVideoSoundtrack()", page)
+        self.assertIn("function pauseArchiveComparisonAudio(except=null)", page)
+        self.assertIn("pauseArchiveVideoSoundtrack();pauseArchiveComparisonAudio(entry.player);", page)
+        self.assertIn("video.addEventListener('play',()=>pauseArchiveComparisonAudio())", page)
+
     def test_public_ui_recovers_from_a_transient_archive_video_failure(self) -> None:
         """A 503 after detail success must not leave a gray 0:00 media player."""
         page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
 
         self.assertIn("function recoverArchiveMedia(video)", page)
         self.assertIn("Saved video will retry automatically.", page)
-        self.assertIn("archivePlayers().forEach(video=>video.addEventListener('error'", page)
+        self.assertIn("video.addEventListener('error',()=>recoverArchiveMedia(video))", page)
         self.assertIn("reconnecting full recording", page)
         self.assertIn("retryArchiveDetail(detail.session_id)", page)
 
