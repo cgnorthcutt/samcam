@@ -127,6 +127,18 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Captured with ${device}", page)
         self.assertIn("detail.capture_device", page)
 
+    def test_worker_stream_list_uses_capture_device_icons(self) -> None:
+        """Archive labels must distinguish the USB body camera from glasses captures."""
+        page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
+
+        self.assertIn("Worker Streams", page)
+        self.assertIn("${sessions.length} streams", page)
+        self.assertIn("function streamDeviceIcon(stream)", page)
+        self.assertIn("/meta|oakley|vanguard/", page)
+        self.assertIn("'🥽'", page)
+        self.assertIn("'📹'", page)
+        self.assertIn("stream.capture_device", page)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
