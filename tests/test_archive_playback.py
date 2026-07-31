@@ -139,6 +139,13 @@ class ArchivePlaybackContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("'📹'", page)
         self.assertIn("stream.capture_device", page)
 
+    def test_worker_stream_list_can_show_an_explicit_recording_label(self) -> None:
+        page = (Path(__file__).parents[1] / "cloud" / "static" / "index.html").read_text()
+
+        self.assertIn("function streamDisplayName(stream)", page)
+        self.assertIn("source.match(/\\s—\\s(.+)$/)", page)
+        self.assertIn("title.textContent=streamDisplayName(stream)", page)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

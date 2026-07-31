@@ -167,6 +167,11 @@ function streamDeviceLabel(stream) {
   const device=String(stream.capture_device||'').trim();
   return device || (streamDeviceIcon(stream)==='🥽' ? 'Meta Oakley Vanguard AI Glasses' : 'USB body camera');
 }
+function streamDisplayName(stream) {
+  const source=String(stream.source||'');
+  const label=source.match(/\s—\s(.+)$/)?.[1]?.trim();
+  return `${formatDate(stream.started_at)}${label ? ` - ${label}` : ''}`;
+}
 function renderArchiveList(sessions) {
   const target=$('archiveList');
   target.replaceChildren();
@@ -190,7 +195,7 @@ function renderArchiveList(sessions) {
     device.setAttribute('aria-label',streamDeviceLabel(stream));
     const title=document.createElement('span');
     title.className='title';
-    title.textContent=formatDate(stream.started_at);
+    title.textContent=streamDisplayName(stream);
     heading.append(device,title);
     const meta=document.createElement('span');
     meta.className='meta';
