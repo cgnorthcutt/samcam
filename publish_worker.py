@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a local Sam Cam feed and create a durable, session-based archive.
+"""Publish a local Ego Capture feed and create a durable, session-based archive.
 
 This runs beside ``server.py`` on the laptop attached to the USB body camera.
 It never accepts inbound traffic: frames, transcript lines, and compact MP4
@@ -31,32 +31,33 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 
 HERE = Path(__file__).resolve().parent
-LOCAL_URL = os.environ.get("SAMCAM_LOCAL_URL", "http://127.0.0.1:8011").rstrip("/")
-# Workers use Render directly for their long-lived WebSocket. Viewers use samcam.app.
-RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam-relay.onrender.com").rstrip("/")
-WORKER = os.environ.get("SAMCAM_WORKER", "Curtis").strip() or "Curtis"
-ARCHIVE_ROOT = Path(os.environ.get("SAMCAM_ARCHIVE_DIR", str(HERE / "archives"))).expanduser()
+LOCAL_URL = os.environ.get("EGOCAPTURE_LOCAL_URL", "http://127.0.0.1:8011").rstrip("/")
+# The relay is intentionally supplied by the operator, rather than embedding
+# any personal deployment in this repository.
+RELAY_URL = os.environ.get("EGOCAPTURE_RELAY_URL", "").rstrip("/")
+WORKER = os.environ.get("EGOCAPTURE_WORKER", "camera-lab").strip() or "camera-lab"
+ARCHIVE_ROOT = Path(os.environ.get("EGOCAPTURE_ARCHIVE_DIR", str(HERE / "archives"))).expanduser()
 # Parts are a recovery/preview format.  Five minutes keeps the archive usable
 # without turning every short session into dozens of tiny videos.  Operators
 # can still request shorter parts when a relay or network needs them.
-ARCHIVE_SEGMENT_SECONDS = max(5.0, float(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_SECONDS", "300")))
-ARCHIVE_FPS = max(1, int(os.environ.get("SAMCAM_ARCHIVE_FPS", "30")))
-MAX_ARCHIVE_SEGMENT_BYTES = max(500_000, int(os.environ.get("SAMCAM_ARCHIVE_SEGMENT_MAX_BYTES", "8000000")))
+ARCHIVE_SEGMENT_SECONDS = max(5.0, float(os.environ.get("EGOCAPTURE_ARCHIVE_SEGMENT_SECONDS", "300")))
+ARCHIVE_FPS = max(1, int(os.environ.get("EGOCAPTURE_ARCHIVE_FPS", "30")))
+MAX_ARCHIVE_SEGMENT_BYTES = max(500_000, int(os.environ.get("EGOCAPTURE_ARCHIVE_SEGMENT_MAX_BYTES", "8000000")))
 # Keep each preview part below the relay's single-WebSocket-message limit.  A
 # five minute part needs a much lower bitrate than a ten second part, while
 # the browser's live MJPEG feed remains entirely unaffected.
-ARCHIVE_VIDEO_MAX_KBPS = max(64, int(os.environ.get("SAMCAM_ARCHIVE_VIDEO_MAX_KBPS", "1100")))
+ARCHIVE_VIDEO_MAX_KBPS = max(64, int(os.environ.get("EGOCAPTURE_ARCHIVE_VIDEO_MAX_KBPS", "1100")))
 ARCHIVE_SEGMENT_SIZE_HEADROOM = 0.80
 ARCHIVE_AUDIO_RATE = 16_000
 ARCHIVE_AUDIO_CHANNELS = 1
 ARCHIVE_AUDIO_BYTES_PER_SECOND = ARCHIVE_AUDIO_RATE * ARCHIVE_AUDIO_CHANNELS * 2
 # AAC-LC at this rate is supported by Chrome/Safari and comfortably preserves
 # speech while keeping five-minute preview parts below the relay message cap.
-ARCHIVE_AUDIO_KBPS = max(24, int(os.environ.get("SAMCAM_ARCHIVE_AUDIO_KBPS", "48")))
+ARCHIVE_AUDIO_KBPS = max(24, int(os.environ.get("EGOCAPTURE_ARCHIVE_AUDIO_KBPS", "48")))
 ARCHIVE_PREVIEW_AUDIO_KBPS = max(16, min(ARCHIVE_AUDIO_KBPS, 32))
 ARCHIVE_RECORDING_CHUNK_BYTES = 1_500_000
 ARCHIVE_RECORDING_CHUNKS_PER_TICK = max(
-    1, int(os.environ.get("SAMCAM_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
+    1, int(os.environ.get("EGOCAPTURE_ARCHIVE_RECORDING_CHUNKS_PER_TICK", "3"))
 )
 RECONNECT_SECONDS = 2.0
 # A faster status heartbeat starts the public relay as soon as the laptop has
@@ -272,7 +273,7 @@ def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
         "session_id": str(metadata["session_id"]),
         "clip": {
             "id": str(metadata["session_id"]),
-            "name": str(metadata.get("source") or "Sam Cam recording"),
+            "name": str(metadata.get("source") or "Egocentric camera recording"),
             "duration": round(duration, 2),
         },
         "sample_fps": round(sample_fps, 4),
@@ -298,7 +299,7 @@ def analyze_recording(path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
             "video_derived": ["video duration", "sampled frame luminance", "sampled frame-to-frame motion"],
             "audio_derived": ["sampled spectral energy", "high-frequency energy share", "near-clip sample share"],
             "model_assumptions": ["lighting quality favors mid-range luminance", "capture index weights lighting 55% and stability 45%"],
-            "estimated": ["battery remaining and ETA", "effective worn load and neck torque", "ergonomic and market-fit scores"],
+            "estimated": ["battery remaining and ETA", "effective worn load and neck torque", "exploratory capture-profile scores"],
             "limitations": ["battery values are listing-based estimates, not telemetry", "motion is a frame-difference index, not physical acceleration", "ergonomic and suitability scores are unvalidated scenario models"],
         },
     }
@@ -587,7 +588,7 @@ class SessionArchiver:
             finally:
                 self._finish_encoding(segment.session_id, segment.sequence, threading.current_thread())
 
-        thread = threading.Thread(target=encode, daemon=True, name=f"samcam-archive-{segment.sequence}")
+        thread = threading.Thread(target=encode, daemon=True, name=f"egocapture-archive-{segment.sequence}")
         self.encoding_parts.add(key)
         self.encoding.setdefault(segment.session_id, set()).add(thread)
         thread.start()
@@ -684,7 +685,12 @@ class SessionArchiver:
             command = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "concat", "-safe", "0", "-i", str(manifest),
-                "-c", "copy", "-movflags", "+faststart", str(temporary),
+                # Do not decode, filter, resample, or re-encode either stream
+                # while finalizing an archive. The encoded AAC packets are the
+                # camera capture used for every archive playback.
+                "-map", "0:v?", "-map", "0:a?", "-map", "0:s?",
+                "-c:v", "copy", "-c:a", "copy", "-c:s", "copy",
+                "-movflags", "+faststart", str(temporary),
             ]
             completed = subprocess.run(command, capture_output=True, timeout=600)
             if completed.returncode != 0 or not temporary.exists() or temporary.stat().st_size == 0:
@@ -735,7 +741,7 @@ class SessionArchiver:
             target=self._stitch_recording,
             args=(dict(metadata),),
             daemon=True,
-            name=f"samcam-recording-{session_id[-8:]}",
+            name=f"egocapture-recording-{session_id[-8:]}",
         )
         self.stitching[session_id] = thread
         thread.start()
@@ -779,7 +785,7 @@ class SessionArchiver:
             target=self._analyze_recording,
             args=(dict(metadata),),
             daemon=True,
-            name=f"samcam-analytics-{session_id[-8:]}",
+            name=f"egocapture-analytics-{session_id[-8:]}",
         )
         self.analyzing[session_id] = thread
         thread.start()
@@ -1049,7 +1055,7 @@ class SessionArchiver:
 def relay_websocket_url() -> str:
     parsed = urlsplit(RELAY_URL)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise RuntimeError("SAMCAM_RELAY_URL must start with http:// or https://")
+        raise RuntimeError("EGOCAPTURE_RELAY_URL must start with http:// or https://")
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, f"{parsed.path.rstrip('/')}/ws/worker/{quote(WORKER)}", "", ""))
 
@@ -1390,7 +1396,7 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
-    print(f"Sam Cam public publisher\n  local: {LOCAL_URL}\n  relay: {RELAY_URL}\n  worker: {WORKER}\n  archive: {ARCHIVE_ROOT}")
+    print(f"Egocentric Camera Lab publisher\n  local: {LOCAL_URL}\n  relay: {RELAY_URL}\n  worker: {WORKER}\n  archive: {ARCHIVE_ROOT}")
     await connected_publisher(stop, archiver)
     archiver.stop()
     archiver.wait_for_encoding()

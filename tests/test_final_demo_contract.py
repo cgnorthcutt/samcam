@@ -1,4 +1,4 @@
-"""Fast, dependency-free guards for the final public demo configuration."""
+"""Fast, dependency-free guards for the camera-lab relay configuration."""
 
 from __future__ import annotations
 
@@ -48,14 +48,14 @@ class FinalDemoContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.live)
         self.assertEqual(state.frame, b"jpeg")
 
-    def test_public_demo_remains_single_instance_and_documents_recovery(self) -> None:
-        """Keep live in one process and keep its recovery runbook discoverable."""
+    def test_relay_remains_single_instance_and_documents_recovery(self) -> None:
+        """Keep live in one process and keep its recovery note discoverable."""
         render = (ROOT / "render.yaml").read_text()
         checklist = (ROOT / "docs" / "ROBUSTNESS_CHECKLIST.md").read_text()
 
         self.assertIn("numInstances: 1", render)
-        self.assertIn("archive:\"reconnecting\"", checklist)
-        self.assertIn("Worker Curtis is not streaming at this time", checklist)
+        self.assertIn("archive is ready", checklist)
+        self.assertIn("live image clears", checklist)
 
     def test_native_camera_stall_falls_back_to_verified_ffmpeg_profiles(self) -> None:
         """A UVC helper that yields audio but no frames must not strand Live."""

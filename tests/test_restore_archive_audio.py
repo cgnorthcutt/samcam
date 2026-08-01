@@ -40,7 +40,7 @@ RAW_VANGUARD_ORIGINALS = (
 
 def raw_media_integration_enabled() -> bool:
     return (
-        os.environ.get("SAMCAM_RUN_MEDIA_INTEGRATION") == "1"
+        os.environ.get("EGOCAPTURE_RUN_MEDIA_INTEGRATION") == "1"
         and all(path.is_file() for path in RAW_VANGUARD_ORIGINALS)
     )
 
@@ -227,13 +227,13 @@ class RestoreArchiveAudioTests(unittest.TestCase):
 
     @unittest.skipUnless(
         raw_media_integration_enabled(),
-        "set SAMCAM_RUN_MEDIA_INTEGRATION=1 with the original Vanguard MOVs present",
+        "set EGOCAPTURE_RUN_MEDIA_INTEGRATION=1 with the original Vanguard MOVs present",
     )
     def test_raw_vanguard_originals_are_stream_copied_packet_for_packet(self) -> None:
         """Opt-in proof against the actual original, not a cached archive MP4."""
         ffmpeg = command_path("ffmpeg")
         ffprobe = command_path("ffprobe")
-        with tempfile.TemporaryDirectory(prefix="samcam-audio-preservation-") as temporary_directory:
+        with tempfile.TemporaryDirectory(prefix="egocapture-audio-preservation-") as temporary_directory:
             temporary_root = Path(temporary_directory)
             for source in RAW_VANGUARD_ORIGINALS:
                 with self.subTest(source=source.name):

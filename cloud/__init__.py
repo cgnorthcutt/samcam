@@ -1,1 +1,1 @@
-"""Public Sam Cam relay package."""
+"""Egocentric Camera Lab relay package."""

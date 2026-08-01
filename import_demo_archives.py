@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add the supplied Meta Oakley Vanguard demos to the Sam Cam archive.
+"""Add the supplied Meta Oakley Vanguard demos to the Ego Capture archive.
 
 The browser-ready H.264/AAC copies live under ``.cache``.  Their original
 HEVC MOVs retain the authoritative QuickTime capture dates, so the importer

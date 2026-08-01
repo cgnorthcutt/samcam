@@ -1854,9 +1854,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("X-SamCam-Audio-Format", "s16le")
-        self.send_header("X-SamCam-Audio-Rate", str(LIVE_AUDIO_SAMPLE_RATE))
-        self.send_header("X-SamCam-Audio-Channels", str(LIVE_AUDIO_CHANNELS))
+        self.send_header("X-EgoCapture-Audio-Format", "s16le")
+        self.send_header("X-EgoCapture-Audio-Rate", str(LIVE_AUDIO_SAMPLE_RATE))
+        self.send_header("X-EgoCapture-Audio-Channels", str(LIVE_AUDIO_CHANNELS))
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True

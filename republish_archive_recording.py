@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Safely replace one completed public archive MP4 without touching Live.
 
-The normal publisher owns the Curtis live WebSocket.  This maintenance tool
+The normal publisher owns the live camera WebSocket. This maintenance tool
 uses a separate worker identity and sends only durable archived-recording
 chunks, so it cannot blank or interrupt the live camera. It can replace the
 primary improved MP4 or backfill the retained original MP4 used by Archive's
@@ -9,10 +9,10 @@ audio A/B comparison.
 
 Example:
 
-    SAMCAM_RELAY_URL=https://samcam.app \
+    EGOCAPTURE_RELAY_URL=https://<your-relay-host> \
       .venv/bin/python republish_archive_recording.py \
-      Curtis-20260730T161648Z-b54a5006 \
-      archives/Curtis-20260730T161648Z-b54a5006/recording.mastered.mp4
+      camera-lab-20260730T161648Z-b54a5006 \
+      archives/camera-lab-20260730T161648Z-b54a5006/recording.mastered.mp4
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 
 
-RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam-relay.onrender.com").rstrip("/")
+RELAY_URL = os.environ.get("EGOCAPTURE_RELAY_URL", "").rstrip("/")
 MAINTENANCE_WORKER = (
-    os.environ.get("SAMCAM_ARCHIVE_MAINTENANCE_WORKER", "SamCamArchiveMaintenance").strip()
-    or "SamCamArchiveMaintenance"
+    os.environ.get("EGOCAPTURE_ARCHIVE_MAINTENANCE_WORKER", "EgoCaptureArchiveMaintenance").strip()
+    or "EgoCaptureArchiveMaintenance"
 )
 ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
@@ -55,7 +55,7 @@ class RecordingChunk:
 def relay_websocket_url(worker: str, relay_url: str = RELAY_URL) -> str:
     parsed = urlsplit(relay_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("SAMCAM_RELAY_URL must start with http:// or https://")
+        raise ValueError("EGOCAPTURE_RELAY_URL must start with http:// or https://")
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, f"{parsed.path.rstrip('/')}/ws/worker/{quote(worker)}", "", ""))
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Remove explicitly named archived sessions from the public Sam Cam relay.
+"""Remove explicitly named archived sessions from a configured relay.
 
 This utility only asks the Render relay to remove already-uploaded archive
 records.  It never reads, modifies, or deletes the local ``archives/`` folder.
 
 Examples:
-    .venv/bin/python purge_archives.py Curtis-20260730T052210Z-5f4ba65e
-    SAMCAM_WORKER=Curtis .venv/bin/python purge_archives.py --dry-run SESSION_ID
+    .venv/bin/python purge_archives.py camera-lab-20260730T052210Z-5f4ba65e
+    EGOCAPTURE_ARCHIVE_MAINTENANCE_WORKER="Archive cleanup" \
+      .venv/bin/python purge_archives.py --dry-run SESSION_ID
 """
 
 from __future__ import annotations
@@ -22,10 +23,10 @@ import aiohttp
 
 
 # Keep the same relay and worker configuration conventions as publish_worker.py.
-RELAY_URL = os.environ.get("SAMCAM_RELAY_URL", "https://samcam-relay.onrender.com").rstrip("/")
+RELAY_URL = os.environ.get("EGOCAPTURE_RELAY_URL", "").rstrip("/")
 # Archive deletion does not need to impersonate an active camera worker.  A
 # distinct default avoids replacing that worker's live WebSocket state.
-WORKER = os.environ.get("SAMCAM_ARCHIVE_MAINTENANCE_WORKER", "SamCamArchiveMaintenance").strip() or "SamCamArchiveMaintenance"
+WORKER = os.environ.get("EGOCAPTURE_ARCHIVE_MAINTENANCE_WORKER", "EgoCaptureArchiveMaintenance").strip() or "EgoCaptureArchiveMaintenance"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{3,127}$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$")
 
@@ -34,14 +35,14 @@ def relay_websocket_url(worker: str) -> str:
     """Return the worker WebSocket endpoint for the configured Render relay."""
     parsed = urlsplit(RELAY_URL)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("SAMCAM_RELAY_URL must start with http:// or https://")
+        raise ValueError("EGOCAPTURE_RELAY_URL must start with http:// or https://")
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, f"{parsed.path.rstrip('/')}/ws/worker/{quote(worker)}", "", ""))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Delete explicitly named uploaded archive sessions from the Sam Cam relay."
+        description="Delete explicitly named uploaded archive sessions from the configured relay."
     )
     parser.add_argument(
         "session_ids",
@@ -52,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--worker",
         default=WORKER,
-        help="maintenance WebSocket name (default: SAMCAM_ARCHIVE_MAINTENANCE_WORKER)",
+        help="maintenance WebSocket name (default: EGOCAPTURE_ARCHIVE_MAINTENANCE_WORKER)",
     )
     parser.add_argument(
         "--dry-run",

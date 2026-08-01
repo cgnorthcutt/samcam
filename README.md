@@ -1,64 +1,51 @@
-# Sam Cam
+# Egocentric Camera Lab
 
-[**Open the public demo at samcam.app →**](https://samcam.app)
+An independent experiment in connecting USB and wearable cameras to a simple
+browser-based live capture app. It explores how an everyday camera can become
+a live, remotely viewable point-of-view feed with local transcription, saved
+sessions, and lightweight video analysis.
 
-Sam Cam turns a compatible USB body camera into a local and public live view
-with live transcription, saved sessions, and per-video customer-fit analytics.
-The reference device is the [Mini Body Camera B08KY7KLPB](https://www.amazon.com/dp/B08KY7KLPB).
-It captures only the selected USB camera's video and audio—it never silently
-falls back to the Mac camera, phone, or another webcam.
+This is a personal hardware/software project. It is not affiliated with or
+endorsed by any employer, camera maker, or platform.
 
-> **Final-demo operator guide:** see [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md).
-> It is the short, step-by-step checklist for starting, verifying, and
-> recovering the demo.
+## What it does
 
-## What is running where
+- Detects a compatible macOS UVC video and audio device.
+- Shows the selected camera locally, without falling back to the laptop webcam
+  or phone camera.
+- Sends a live JPEG/video-and-audio relay through one outbound connection.
+- Saves completed recordings, transcript lines, and per-video visual analysis.
+- Lets a separate browser view the current feed or previous sessions.
+
+The reference device is a compact USB body camera, but the project is intended
+for experimentation with any source macOS exposes as a UVC-style camera. Two
+example clips from wearable glasses are included to exercise a second capture
+format; their original capture times are retained when imported.
+
+## Architecture
 
 ```text
-USB camera → local Sam Cam → local publisher ──outbound WSS──> Render relay → samcam.app viewers
-                   │                                      │
-                   └─ local session parts / final MP4 ────┴─ Postgres archive + analytics
+camera → local capture app → outbound publisher → web relay → viewers
+            └─ local archive ────────────────┴─ durable session archive
 ```
 
-- The USB camera must remain connected to the worker laptop. Public viewers do
-  not access the camera directly.
-- The local app owns the camera and sends JPEG video, body-camera audio, and
-  local Whisper transcript lines to the publisher.
-- The Render relay serves the public Live, Archive, and Analytics views.
-  Archived sessions remain available when the laptop is off **after** their
-  media, transcript, and analytics have finished uploading.
-- Live video is deliberately served by one relay instance: current frames and
-  short-lived live-audio packets are in memory, so it must not be scaled across
-  multiple web instances without shared live-state infrastructure.
+The camera remains connected to the local laptop. Remote viewers never access
+the camera directly. A published live stream needs the local capture app and
+publisher to stay running; already-uploaded recordings can be served by the
+relay independently.
 
-## Camera compatibility
+## Run locally
 
-Sam Cam can work with another source when macOS exposes it as a compatible
-UVC-style video-and-audio device. The USB body camera above is the supported
-and validated demo device; other cameras may need different capture settings.
-
-The archive includes two clearly labeled example clips captured with previously
-hacked **Meta Oakley Vanguard AI Glasses**. Their display times come from the
-original MOV files' QuickTime capture metadata—not from the later import or
-transcode time.
-
-## Install and run locally
-
-Install FFmpeg:
+Install FFmpeg and build the macOS capture helper:
 
 ```bash
 brew install ffmpeg
-```
-
-Build the native capture helper:
-
-```bash
 swiftc -O bodycam_capture.swift -o bodycam_capture \
   -framework AVFoundation -framework CoreImage -framework CoreMedia \
   -framework CoreVideo -framework AudioToolbox
 ```
 
-Create the local transcription/publisher environment:
+Create the local environments:
 
 ```bash
 uv venv --python 3.12 .venv
@@ -66,230 +53,85 @@ uv pip install --python .venv/bin/python -r requirements-transcription.txt
 uv pip install --python .venv/bin/python -r requirements-publisher.txt
 ```
 
-Start the local camera app on the usual demo port:
+Start the local app:
 
 ```bash
 python3 server.py 8011
 ```
 
-Open [http://localhost:8011](http://localhost:8011). The first transcription
-run downloads `mlx-community/whisper-large-v3-turbo`; later runs use its local
-model cache.
+Open [http://localhost:8011](http://localhost:8011). The optional local
+transcription worker downloads its model on the first run.
 
-For the public demo, start the publisher in a second terminal after the local
-app is running:
+## Publish to your own relay
+
+The project intentionally contains no production host name, account, or
+credential. Point the publisher at a relay you control:
 
 ```bash
-SAMCAM_RELAY_URL=https://samcam.app \
-SAMCAM_WORKER=Curtis \
+EGOCAPTURE_RELAY_URL=https://<your-relay-host> \
+EGOCAPTURE_WORKER="camera-lab" \
 .venv/bin/python publish_worker.py
 ```
 
-The publisher makes an outbound connection only; no port forwarding or public
-IP address is needed. Do not put API keys, database URLs, or other credentials
-in source files, commands recorded in a demo, or Git.
+The publisher only creates an outbound connection. Do not put API keys,
+database URLs, or personal recordings in Git.
 
-## Camera flow
+`render.yaml` is an optional deployment blueprint for a single Python relay.
+Set `DATABASE_URL` in the host's private environment if you want durable
+archival storage. Live state is intentionally held by one relay process;
+horizontally scaling it needs shared live-state infrastructure.
 
-The reference camera has two USB personalities:
+## Camera mode flow
 
-1. Connect the powered-off camera by USB. It appears as **storage mode**; its
-   recorded clips can be browsed locally.
-2. While it remains connected, short-press the camera's Record/ON-OFF button.
-3. It re-enumerates as `GENERAL - UVC` plus `GENERAL - AUDIO`.
-4. Sam Cam detects UVC mode, begins the local live view, and the publisher
-   makes the named public worker live.
+Many compact cameras appear as USB storage when powered off and re-enumerate as
+UVC video plus audio after pressing Record. macOS can take several seconds to
+recognize that mode change. The local app clears stale live frames when the
+camera disconnects or returns to storage mode rather than substituting an old
+recording.
 
-Mode changes can take several seconds while macOS re-enumerates the USB
-devices. During that transition, wait for Sam Cam to update rather than
-restarting both processes.
+## Archive and analysis
 
-When the camera is unplugged or returns to storage mode, Live correctly clears
-the old image and shows that the worker is not streaming. It must never replace
-that state with archived footage.
+Sessions are temporarily saved as playable parts while recording. A background
+job combines completed parts into one MP4 without blocking playback. The final
+archive uses the camera's original audio track. Transcript lines are assistive
+and may reject weak, noisy, repetitive, or low-confidence speech.
 
-## Live video, sound, and transcript
-
-- **Live video** is a shared MJPEG feed sourced only from the USB UVC camera.
-  On the public site it is available at `/?worker=Curtis` by default.
-- **Sound is opt-in.** A viewer must select **Enable sound** because browsers
-  block autoplay with audio. Use headphones for a final demo when practical.
-  The browser applies an attenuated, high-pass/low-pass filtered, compressed
-  playback path to reduce speaker-to-camera feedback; it cannot guarantee safe
-  playback when the camera microphone is next to loud speakers.
-- **Live transcription** uses the body-camera microphone and a local MLX
-  Whisper model. It is scoped to the current live session only; when the
-  session ends, accepted lines move with that saved session into Archive.
-  It can show no speech when the model rejects silence, weak speech, feedback,
-  repetition, or low-confidence audio. It is a demo aid, not a verbatim or
-  safety-critical record.
-
-Useful transcription tuning variables:
+For legacy local sessions whose playback MP4 diverged from the retained camera
+track, run the packet-preserving repair after capture has stopped:
 
 ```bash
-BODYCAM_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo \
-BODYCAM_TRANSCRIPT_LANGUAGE=en \
-BODYCAM_TRANSCRIPT_CHUNK_SECONDS=3 \
-BODYCAM_TRANSCRIPT_MIN_AVG_LOGPROB=-1.0 \
-python3 server.py 8011
+python3 sync_archive_playback_audio.py archives
 ```
 
-Raising `BODYCAM_TRANSCRIPT_MIN_AVG_LOGPROB` favors fewer false lines;
-lowering it accepts more uncertain audio.
+It uses FFmpeg `-c:a copy` and verifies encoded audio packet hashes before an
+atomic replacement. Silent recordings are reported and never modified.
 
-## Archive and analytics
+Share the archive directly at `https://<your-relay-host>/archive` (or
+`/#archive`).
 
-Every public live session is also captured locally as MP4 parts with AAC audio.
-While a session is active or just ended:
+Per-video analysis is exploratory—not device telemetry, medical guidance,
+market research, or measured ergonomics. It combines image-derived motion and
+lighting samples with clearly marked assumptions.
 
-- Parts close roughly every **five minutes** by default
-  (`SAMCAM_ARCHIVE_SEGMENT_SECONDS=300`). They can appear as playable parts
-  before the full session is ready.
-- A background job stitches finished parts into one final MP4 without changing
-  its camera audio. It does not block part playback; the browser can switch to
-  the final recording once it arrives.
-- Archive has one audio source: the original camera track embedded in that
-  final MP4. A duplicate compatibility object is retained only so older upload
-  states can fall back safely, not for a second player or processing pass.
-- The publisher uploads the completed MP4, plus the
-  accepted transcript and analytics. Allow this to finish before turning off
-  the laptop if the new recording must be available publicly.
+## Tests
 
-Archive is durable only after the Render Postgres-backed relay has accepted the
-uploads. If the relay shows **Archive is temporarily unavailable** or
-**Reconnecting**, it deliberately preserves the last known list or retries
-instead of pretending a durable archive is empty. Live video may still work
-while Archive is reconnecting.
-
-To permanently remove an uploaded public session, use the explicit maintenance
-tool with the session ID. This deletes the public video, transcript, and
-analytics and writes a deletion marker so the connected publisher does not
-re-upload it. It intentionally does **not** delete the local `archives/`
-folder.
+Run the fast local suite:
 
 ```bash
-.venv/bin/python purge_archives.py SESSION_ID
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-Use `--dry-run` first when verifying IDs. Deletion is permanent for the public
-relay; keep any local copy you need before requesting it.
+The test suite uses local fixtures and in-memory archive contracts. It does
+not require a connected camera, hosted account, or network access.
 
-The **Analytics** tab appears for completed recordings whose per-video analysis
-has uploaded. Its motion and lighting series are sampled from the video; battery
-ETA, weight, neck-load, ergonomics, customer-fit scores, and the Pareto view
-combine those measurements with stated product assumptions. These are planning
-estimates—not device telemetry, medical guidance, market research, or measured
-biomechanics.
-
-### Optional archive-audio restoration
-
-The final public archive always keeps the original camera audio. Live sound is
-also deliberately separate from offline work. For a private,
-presentation-only export, the helper below can create a second MP4 without
-changing the recording SamCam serves.
-
-For a historical MP4 that needs a cleaner, presentation-ready speech track,
-use the helper below on the worker laptop. It preserves the source file and
-writes a separate output:
-
-```bash
-.venv/bin/python restore_archive_audio.py archives/SESSION_ID/recording.mp4 \
-  --mains-hz 60 \
-  --output archives/SESSION_ID/recording.mastered.mp4
-```
-
-The deterministic two-pass pass resamples to 48 kHz, removes rumble and
-excessive high-frequency noise, uses supported de-click/de-clip and adaptive
-denoise filters, normalizes spoken audio to -16 LUFS, applies a true-peak
-limiter, and remuxes AAC-LC. It validates the output before atomically placing
-it, so an interruption leaves the source recording intact. Add `--mains-hz 60`
-only for a clearly audible 60 Hz electrical hum (or `50` where appropriate);
-hum notches are opt-in because they can thin some voices.
-
-Use `--dry-run` to inspect the exact FFmpeg commands, `--overwrite` only to
-replace an earlier restored output, and see `python3 restore_archive_audio.py
---help` for the conservative `--no-denoise` and `--no-decrackle` fallbacks.
-
-The two bundled Meta Oakley Vanguard demo videos use browser-compatible H.264
-video with the original 48 kHz stereo AAC packets stream-copied from the device
-MOVs. Run `.venv/bin/python import_demo_archives.py --replace-media` when those
-private originals are present locally to refresh the demos, and see
-[`docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md`](docs/VANGUARD_DEMO_AUDIO_PRESERVATION.md)
-for the packet/PCM regression contract. Do not replace a public archive MP4
-with a restored export: public SamCam playback deliberately stays on the
-camera's original soundtrack.
-
-## Expected public states
-
-| What you see | Meaning | Normal next step |
-|---|---|---|
-| `Curtis is live` | Fresh camera frames are reaching the relay. | Click **Enable sound** if sound is desired. |
-| `Worker Curtis is not streaming at this time` | The camera is unplugged, in storage mode, not recording, or the local publisher has no fresh frame. | Check the local app, then press Record on the connected camera. |
-| `Connecting to Curtis's live camera…` | The public page has a fresh live session and is opening the MJPEG feed. | Give it a few seconds; reload once only if it does not resolve. |
-| `Archive is temporarily unavailable` / `Reconnecting…` | The durable archive database is unhealthy or reconnecting. | Live can remain available. Check `/healthz`; do not treat this as an empty archive. |
-| Public HTTP `503` | The Render web service is not currently serving requests. | Check Render service and database health before restarting the local camera. |
-
-## Render relay
-
-`render.yaml` defines the relay as one Python web service. The archive needs a
-Render Postgres instance in the same region, with `DATABASE_URL` set to that
-instance's **Internal Database URL**. The health endpoint is:
-
-```bash
-curl -fsS https://samcam.app/healthz
-```
-
-Healthy archive output includes `"archive":"ready"`. A response with
-`"archive":"reconnecting"` means the live relay is deliberately remaining
-available while durable archive requests retry; Archive endpoints can return
-503 in that state rather than showing a false empty result.
-
-The public demo is intentionally unauthenticated. Anyone who knows a worker
-name can view its stream, and anyone can attempt to publish under a worker
-name. It is only appropriate for a short, non-private demo. Remove the public
-service after the demo.
-
-## Useful files
+## Project layout
 
 ```text
-server.py                 local HTTP server, USB discovery, capture, local UI
-bodycam_capture.swift     native AVFoundation video/audio helper
-publish_worker.py         outbound public relay publisher and session archiver
-cloud/main.py             Render relay, durable archive API, analytics API
-cloud/static/index.html   public Live / Archive / Analytics interface
-transcribe_worker.py      persistent local MLX Whisper worker
-import_demo_archives.py   idempotent Meta Oakley demo metadata/media seeder
-purge_archives.py         explicit public archive deletion utility
-republish_archive_recording.py isolated public MP4 replacement utility
-docs/DEMO_RUNBOOK.md      final-demo checklist and recovery guide
-ideas.md                  investigation history and fallback ideas
+server.py                 local camera discovery, capture, transcript, and UI
+bodycam_capture.swift     AVFoundation video/audio helper
+publish_worker.py         outbound relay publisher and session archiver
+cloud/main.py             relay, archive API, and analysis API
+cloud/static/             public browser interface
+transcribe_worker.py      optional local MLX Whisper worker
+docs/                     generic operating and validation notes
 ```
-
-## HTTP endpoints
-
-### Local app
-
-| Route | Purpose |
-|---|---|
-| `GET /` | Local Sam Cam interface |
-| `GET /stream.mjpg` | Live USB body-camera MJPEG feed |
-| `GET /api/status` | Camera connection and USB mode |
-| `GET /api/stream` | Local live-capture status |
-| `GET /api/transcript` | Local transcription status and accepted lines |
-| `GET /api/clips` | Local storage-mode clip list |
-| `GET /api/analytics/<id>` | Cached local per-video analysis |
-
-### Public relay
-
-| Route | Purpose |
-|---|---|
-| `GET /healthz` | Relay and archive health |
-| `GET /api/worker/{worker}` | Current public worker live state |
-| `GET /api/worker/{worker}/archives` | Durable archive session list |
-| `GET /api/worker/{worker}/analytics` | Public archive summary analytics |
-| `GET /api/archive/{session}` | Saved session detail and transcript |
-| `GET /api/archive/{session}/analytics` | Per-session public analytics |
-| `GET /archive/{session}/video.mp4` | Completed public MP4 recording |
-
-The local server binds to `127.0.0.1` by default. Pass a different port as the
-first argument if necessary.

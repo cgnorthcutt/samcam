@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sam Cam</title>
+<title>Egocentric Camera Lab</title>
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <style>
   :root {
@@ -271,7 +271,7 @@
     .analytics-charts { grid-template-columns: 1fr; }
   }
 </style>
-<link rel="stylesheet" href="/samsara-ui.css">
+<link rel="stylesheet" href="/egocapture-ui.css">
 </head>
 <body>
 <aside class="app-rail" aria-label="Application navigation">
@@ -286,10 +286,10 @@
   </div>
 </aside>
 <header>
-  <div class="brand"><span id="dot" class="dot"></span> Sam Cam</div>
+  <div class="brand"><span id="dot" class="dot"></span> Egocentric Camera Lab</div>
   <span class="workspace-label">Camera operations</span>
   <div class="meta" id="meta"></div>
-  <div class="tabs" role="tablist" aria-label="Sam Cam views">
+  <div class="tabs" role="tablist" aria-label="Egocentric Camera Lab views">
     <button id="tabStream" class="on" role="tab" aria-selected="true" aria-controls="streamView">Stream</button>
     <button id="tabArchive" role="tab" aria-selected="false" aria-controls="archiveView">Archive</button>
     <button id="tabAnalytics" role="tab" aria-selected="false" aria-controls="analyticsView">Analytics</button>
@@ -310,7 +310,7 @@
         <span id="transcriptStatus">Starting local Whisper&hellip;</span>
       </div>
       <div class="transcript-text" id="transcriptText" role="log" aria-live="polite" aria-relevant="additions text">
-        <div class="transcript-placeholder">Transcript will appear when Sam Cam is live.</div>
+        <div class="transcript-placeholder">Transcript will appear while the camera is live.</div>
       </div>
     </div>
   </section>
@@ -338,8 +338,8 @@
 <section class="analytics" aria-labelledby="analyticsTitle">
   <div class="analytics-head">
     <div class="analytics-title">
-      <h2 id="analyticsTitle">Customer fit analytics</h2>
-      <p>Use-case suitability estimates from per-video signals and device specifications</p>
+      <h2 id="analyticsTitle">Capture-profile explorer</h2>
+      <p>Exploratory estimates from per-video signals and device specifications</p>
     </div>
     <label class="analytics-field" for="analyticsClip">
       Video
@@ -393,7 +393,7 @@
         <div class="metric-sub" id="metricTorque"></div>
       </div>
       <div class="metric">
-        <div class="metric-label">Use-case suitability</div>
+        <div class="metric-label">Capture setup score</div>
         <div class="metric-value" id="metricFit">—</div>
         <div class="metric-sub" id="metricFitSub"></div>
       </div>
@@ -425,10 +425,10 @@
     </div>
 
     <section class="market-fit" aria-labelledby="segmentsTitle">
-      <h3 id="segmentsTitle">Customer segment fit</h3>
+      <h3 id="segmentsTitle">Capture scenarios</h3>
       <div style="overflow-x:auto">
         <table class="fit-table">
-          <caption class="sr-only">Estimated suitability by customer segment</caption>
+          <caption class="sr-only">Exploratory capture suitability by scenario</caption>
           <thead>
             <tr><th>Segment</th><th>Overall</th><th>Battery fit</th><th>Comfort</th><th>Capture</th><th>Readout</th></tr>
           </thead>
@@ -439,7 +439,7 @@
 
     <div class="analytics-foot">
       <span><b>Video-derived:</b> duration, sampled luminance, frame-to-frame motion.</span>
-      <span><b>Scenario model:</b> battery, ETA, static mount moment, wearability proxy, use-case suitability.</span>
+      <span><b>Scenario model:</b> battery, ETA, static mount moment, wearability proxy, and capture setup score.</span>
       <span id="analyticsSampleInfo"></span>
     </div>
   </div>
@@ -516,13 +516,13 @@ function showCameraIdleState() {
 
   if (cameraUiState === 'storage') {
     $('streamIdle').innerHTML =
-      '<div><b>Press Record to go live</b><div class="sub">Sam Cam is plugged in and currently in storage mode.</div></div>';
+      '<div><b>Press Record to go live</b><div class="sub">Ego Capture is plugged in and currently in storage mode.</div></div>';
   } else if (cameraUiState === 'live') {
     $('streamIdle').innerHTML =
-      '<div><b>Starting live camera…</b><div class="sub">Sam Cam switched to live USB mode.</div></div>';
+      '<div><b>Starting live camera…</b><div class="sub">Ego Capture switched to live USB mode.</div></div>';
   } else {
     $('streamIdle').innerHTML =
-      '<div><b>Connect camera</b><div class="sub">Plug in Sam Cam over USB to begin.</div></div>';
+      '<div><b>Connect camera</b><div class="sub">Plug in Ego Capture over USB to begin.</div></div>';
   }
 }
 
@@ -586,7 +586,7 @@ async function pollTranscript() {
     if (data.error) {
       placeholder.textContent = data.error;
     } else if (cameraUiState !== 'live') {
-      placeholder.textContent = 'Transcript will appear when Sam Cam is live.';
+      placeholder.textContent = 'Transcript will appear when Ego Capture is live.';
     } else if (Number(data.audio_seconds || 0) < 0.25) {
       placeholder.textContent = 'No camera audio has arrived yet.';
     } else if (data.silence_events) {
@@ -650,9 +650,9 @@ function renderStatus(s) {
 
   const parts = [];
   if (s.live_available) {
-    parts.push('<span><b>Sam Cam</b> live over USB</span>');
+    parts.push('<span><b>Ego Capture</b> live over USB</span>');
   } else if (usbStorage) {
-    parts.push('<span><b>Sam Cam</b> connected &middot; storage mode</span>');
+    parts.push('<span><b>Ego Capture</b> connected &middot; storage mode</span>');
     if (s.storage?.total) {
       const pct = Math.round(100 * s.storage.used / s.storage.total);
       parts.push(`<span>${fmtSize(s.storage.used)} of ${fmtSize(s.storage.total)} (${pct}%)</span>`);
@@ -804,9 +804,9 @@ function renderPareto(points) {
 function renderFitRows(comfort, capture, runtime, startCharge) {
   const portability = clamp(100 - Math.max(0, analyticsData.device.weight_grams - 40) * 0.45);
   const segments = [
-    {name: 'Personal safety', minutes: 120, weights: [0.30, 0.30, 0.40]},
-    {name: 'Security patrol', minutes: 480, weights: [0.50, 0.20, 0.30]},
-    {name: 'Field inspection', minutes: 240, weights: [0.30, 0.30, 0.40]},
+    {name: 'Walking', minutes: 120, weights: [0.30, 0.30, 0.40]},
+    {name: 'Long recording', minutes: 480, weights: [0.50, 0.20, 0.30]},
+    {name: 'Outdoor exploration', minutes: 240, weights: [0.30, 0.30, 0.40]},
     {name: 'Creator / POV', minutes: 180, weights: [0.20, 0.35, 0.45]},
   ];
   $('fitRows').innerHTML = segments.map(segment => {

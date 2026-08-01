@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from cloud.main import ArchiveStore, ArchiveUnavailable
+from cloud.main import ArchiveConnection, ArchiveStore, ArchiveUnavailable
 
 
 class _FailingAcquire:
@@ -42,6 +42,19 @@ class _MissingArchivePool:
 
 
 class ArchiveResilienceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configured_archive_prefix_is_applied_to_every_query(self) -> None:
+        """A private deployment mapping must not leak into tracked SQL."""
+        seen: list[str] = []
+
+        class Connection:
+            async def execute(self, query: str, *args: object) -> None:
+                seen.append(query)
+
+        connection = ArchiveConnection(Connection(), "private_archive")
+        await connection.execute("SELECT * FROM egocapture_archive_sessions")
+
+        self.assertEqual(seen, ["SELECT * FROM private_archive_sessions"])
+
     async def test_configured_database_never_silently_serves_memory_as_durable_archive(self) -> None:
         store = ArchiveStore()
         store.database_required = True

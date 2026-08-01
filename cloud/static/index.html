@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sam Cam</title>
+<title>Egocentric Camera Lab</title>
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <style>
   :root { color-scheme:dark; --bg:#0d0f12; --panel:#151a20; --panel2:#1b222a; --line:#2a333e; --text:#edf1f7; --muted:#9aa6b5; --green:#45d98b; --red:#ff5a5f; --blue:#7eb7ff; --amber:#f5bd5b; }
@@ -31,7 +31,7 @@
   .market-fit { border-top:1px solid var(--line); padding-top:15px; } .market-fit h2 { margin:0 0 8px; font-size:14px; } .fit-table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; } .fit-table th,.fit-table td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); } .fit-table th { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; } .fit-score { display:flex; align-items:center; gap:8px; min-width:110px; } .fit-bar { width:76px; height:5px; border-radius:999px; background:var(--line); overflow:hidden; } .fit-bar span { display:block; height:100%; background:var(--green); } .analytics-foot { color:var(--muted); font-size:11px; display:flex; gap:14px; flex-wrap:wrap; } .analytics-foot b { color:var(--text); font-weight:600; }
   @media (max-width:900px) { header { flex-wrap:wrap; gap:10px; } .worker-form { margin-left:0; width:100%; } .worker-form input { flex:1; } .live-grid,.archive-grid,.analytics-grid { grid-template-columns:1fr; } .archive-list { min-height:0; } #archiveList { max-height:250px; } .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } #transcript { min-height:180px; max-height:280px; } .archive-details { grid-template-columns:1fr; } #archiveTranscript { border-left:0; border-top:1px solid var(--line); } .analytics-field,.analytics-field select { width:100%; min-width:0; max-width:none; } .assumption-controls { grid-template-columns:1fr; } }
 </style>
-<link rel="stylesheet" href="/static/samsara-ui.css">
+<link rel="stylesheet" href="/static/egocapture-ui.css">
 </head>
 <body>
 <aside class="app-rail" aria-label="Application navigation">
@@ -46,9 +46,9 @@
   </div>
 </aside>
 <header>
-  <div class="brand"><span id="dot" class="dot"></span>Sam Cam</div>
-  <span class="workspace-label">Camera operations</span>
-  <nav class="tabs" aria-label="Sam Cam views">
+  <div class="brand"><span id="dot" class="dot"></span>Egocentric Camera Lab</div>
+  <span class="workspace-label">Camera experiment</span>
+  <nav class="tabs" aria-label="Egocentric Camera Lab views">
     <button class="selected" data-tab="live">Live</button>
     <button data-tab="archive">Archive</button>
     <button data-tab="analytics">Analytics</button>
@@ -64,8 +64,8 @@
     <div class="live-grid">
       <section class="stage">
         <div class="stream">
-          <img id="feed" class="hidden" alt="Live Sam Cam video">
-          <div class="offline" id="offline"><div><b id="offlineTitle">Worker Curtis is not streaming at this time</b><span>Live video appears here when their Sam Cam is connected and recording.</span></div></div>
+          <img id="feed" class="hidden" alt="Live camera video">
+          <div class="offline" id="offline"><div><b id="offlineTitle">Worker Curtis is not streaming at this time</b><span>Live video appears here when their camera is connected and recording.</span></div></div>
           <div id="liveLabel" class="live-label hidden">● LIVE</div>
         </div>
         <div class="bar"><strong id="status">Checking Curtis…</strong><button id="audioToggle" type="button" disabled>Enable sound</button><span class="hint">Public demo feed</span></div>
@@ -91,7 +91,7 @@
 
   <section class="view hidden" id="analyticsView">
     <section class="analytics-panel">
-      <div class="analytics-head"><div><h1>Customer-fit analytics</h1><p>Use-case suitability estimates from per-video signals and device specifications.</p></div><label class="analytics-field" for="analyticsSession">Saved video<select id="analyticsSession" disabled><option>Loading saved videos…</option></select></label><span class="analytics-badge">Measured + estimated</span></div>
+      <div class="analytics-head"><div><h1>Capture-profile explorer</h1><p>Exploratory estimates from per-video signals and device specifications.</p></div><label class="analytics-field" for="analyticsSession">Saved video<select id="analyticsSession" disabled><option>Loading saved videos…</option></select></label><span class="analytics-badge">Measured + estimated</span></div>
       <div class="analytics-loading" id="analyticsLoading">Choose a completed video to analyze.</div>
       <div class="analytics-body hidden" id="analyticsBody">
         <div class="assumption-controls">
@@ -104,15 +104,15 @@
           <div class="metric"><div class="label">Estimated runtime remaining</div><div class="value" id="metricEta">—</div><div class="sub" id="metricEtaSub">Listing-based range</div></div>
           <div class="metric"><div class="label">Listed device weight</div><div class="value" id="metricWeight">—</div><div class="sub">body camera + built-in battery</div></div>
           <div class="metric"><div class="label">Estimated static moment</div><div class="value" id="metricLoad">—</div><div class="sub" id="metricTorque">Static mount model</div></div>
-          <div class="metric"><div class="label">Use-case suitability</div><div class="value" id="metricFit">—</div><div class="sub" id="metricFitSub">Battery, comfort, capture</div></div>
+          <div class="metric"><div class="label">Capture setup score</div><div class="value" id="metricFit">—</div><div class="sub" id="metricFitSub">Battery, comfort, capture</div></div>
         </div>
         <div class="analytics-grid">
           <section class="chart-card"><h2>Operating profile across the video</h2><p>All series normalized to 0–100.</p><div class="chart" id="timelineChart"></div><div class="legend"><span class="battery"><b>—</b> Battery estimate</span><span class="motion"><b>—</b> Video-derived motion</span><span class="lighting"><b>—</b> Video-derived lighting</span></div></section>
           <section class="chart-card"><h2>Operating-state Pareto frontier</h2><p>Non-dominated comfort × capture moments.</p><div class="chart" id="paretoChart"></div><div class="legend"><span style="color:var(--amber)"><b>—</b> Non-dominated frontier</span></div></section>
         </div>
         <section class="chart-card"><h2>Audio spectrogram</h2><p>Frequency energy across the saved recording. Persistent bright high bands indicate potential screech, feedback, or microphone noise.</p><canvas id="audioSpectrogram" class="spectrogram-chart" aria-label="Audio spectrogram for the selected recording"></canvas><div class="legend"><span id="audioSpectrogramInfo">Audio spectrum is preparing…</span><span>Low frequency → high frequency</span></div></section>
-        <section class="market-fit"><h2>Customer segment fit</h2><div style="overflow-x:auto"><table class="fit-table"><caption class="sr-only">Estimated suitability by customer segment</caption><thead><tr><th>Segment</th><th>Overall</th><th>Battery fit</th><th>Comfort</th><th>Capture</th><th>Readout</th></tr></thead><tbody id="fitRows"></tbody></table></div></section>
-        <div class="analytics-foot"><span><b>Video-derived:</b> duration, sampled luminance, frame-to-frame motion.</span><span><b>Scenario model:</b> battery, ETA, static mount moment, wearability proxy, and use-case suitability.</span><span id="analyticsSampleInfo"></span></div>
+        <section class="market-fit"><h2>Capture scenarios</h2><div style="overflow-x:auto"><table class="fit-table"><caption class="sr-only">Exploratory capture suitability by scenario</caption><thead><tr><th>Scenario</th><th>Overall</th><th>Battery fit</th><th>Comfort</th><th>Capture</th><th>Readout</th></tr></thead><tbody id="fitRows"></tbody></table></div></section>
+        <div class="analytics-foot"><span><b>Video-derived:</b> duration, sampled luminance, frame-to-frame motion.</span><span><b>Scenario model:</b> battery, ETA, static mount moment, wearability proxy, and capture setup score.</span><span id="analyticsSampleInfo"></span></div>
       </div>
     </section>
   </section>
@@ -213,7 +213,7 @@ function standbyArchiveVideo() { return archivePlayers()[1-archivePlayerIndex]; 
 function setArchivePlayerActive(video, active) { video.classList.toggle('archive-active',active); video.classList.toggle('archive-inactive',!active); }
 function resetArchivePlayback() { archiveHandoffGeneration++; archiveHandoffKey=null; archivePlayback=null; archivePlayerIndex=0; archivePlayers().forEach((video,index)=>{ video.pause(); video.removeAttribute('src'); video.load(); setArchivePlayerActive(video,index===0); }); }
 function clearArchiveParts() { activeArchivePart=null; activeArchiveParts=[]; const parts=$('archiveParts'); parts.replaceChildren(); parts.classList.add('hidden'); }
-function archiveBaseMeta(detail) { return `${formatDuration(detail.duration_seconds)} saved stream · ${formatBytes(detail.recording_size_bytes || detail.size_bytes)} · ${detail.source || 'Sam Cam capture'}`; }
+function archiveBaseMeta(detail) { return `${formatDuration(detail.duration_seconds)} saved stream · ${formatBytes(detail.recording_size_bytes || detail.size_bytes)} · ${detail.source || 'camera capture'}`; }
 function renderArchiveDevice(detail) { const device=String(detail.capture_device||'').trim(), badge=$('archiveDevice'); badge.textContent=device ? `Captured with ${device}` : ''; badge.classList.toggle('hidden',!device); }
 function archivePartUrl(detail, part) { return `/archive/${encodeURIComponent(detail.session_id)}/segment/${encodeURIComponent(part.sequence)}.mp4`; }
 function showArchiveVideo(source, playback) { const video=activeArchiveVideo(); if (archivePlayback && archivePlayback.source===source) return; video.pause(); video.removeAttribute('src'); video.src=source; video.load(); archivePlayback={...playback,source}; $('archiveOffline').classList.add('hidden'); }
@@ -244,7 +244,7 @@ function syncAnalyticsOptions(sessions) {
   if (!next) {
     const option = document.createElement('option'); option.textContent = 'No completed videos'; select.append(option); select.disabled = true;
     analyticsRequest++; analyticsSessionId = null; analyticsData = null; $('analyticsBody').classList.add('hidden'); $('analyticsLoading').classList.remove('hidden');
-    $('analyticsLoading').textContent = 'A saved Sam Cam recording will appear here when its per-video analysis is ready.'; return;
+    $('analyticsLoading').textContent = 'A saved camera recording will appear here when its per-video analysis is ready.'; return;
   }
   ready.forEach(session => { const option = document.createElement('option'); option.value = session.session_id; option.textContent = `${formatDate(session.started_at)} · ${formatDuration(session.duration_seconds)}${session.source ? ` · ${session.source}` : ''}`; select.append(option); });
   select.disabled = false; select.value = next;
@@ -322,7 +322,7 @@ function renderAudioSpectrogram(spectrogram) {
 
 function renderFitRows(comfort, capture, runtime, startCharge) {
   const portability=clamp(100-Math.max(0,analyticsData.device.weight_grams-40)*.45);
-  const segments=[{name:'Personal safety',minutes:120,weights:[.30,.30,.40]},{name:'Security patrol',minutes:480,weights:[.50,.20,.30]},{name:'Field inspection',minutes:240,weights:[.30,.30,.40]},{name:'Creator / POV',minutes:180,weights:[.20,.35,.45]}];
+  const segments=[{name:'Walking',minutes:120,weights:[.30,.30,.40]},{name:'Long recording',minutes:480,weights:[.50,.20,.30]},{name:'Outdoor exploration',minutes:240,weights:[.30,.30,.40]},{name:'Creator / POV',minutes:180,weights:[.20,.35,.45]}];
   $('fitRows').innerHTML=segments.map(segment=>{const battery=clamp(runtime*startCharge/segment.minutes), ergonomic=comfort*.75+portability*.25, score=battery*segment.weights[0]+ergonomic*segment.weights[1]+capture*segment.weights[2], readout=score>=80?'Strong fit':score>=65?'Promising':'Constrained'; return `<tr><td>${segment.name}</td><td><div class="fit-score"><div class="fit-bar"><span style="width:${score.toFixed(0)}%"></span></div>${score.toFixed(0)}</div></td><td>${battery.toFixed(0)}</td><td>${ergonomic.toFixed(0)}</td><td>${capture.toFixed(0)}</td><td>${readout}</td></tr>`;}).join('');
 }
 
@@ -344,15 +344,20 @@ $('analyticsSession').addEventListener('change',event=>loadAnalytics(event.targe
 ['startCharge','mountDistance'].forEach(id=>$(id).addEventListener('input',renderAnalytics));
 $('targetSession').addEventListener('change',renderAnalytics);
 
-function setTab(tab) { document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===tab)); document.querySelectorAll('[data-rail-tab]').forEach(button=>{const active=button.dataset.railTab===tab;button.classList.toggle('active',active);button.setAttribute('aria-current',active?'page':'false');}); $('liveView').classList.toggle('hidden',tab!=='live'); $('archiveView').classList.toggle('hidden',tab!=='archive'); $('analyticsView').classList.toggle('hidden',tab!=='analytics'); if(tab==='archive') refreshArchives(); if(tab==='analytics') refreshAnalytics(); }
+const WORKSPACE_TABS=new Set(['live','archive','analytics']);
+function tabFromLocation() { const hash=location.hash.replace(/^#/,'').toLowerCase(), path=location.pathname.replace(/^\/+|\/+$/g,'').toLowerCase(); return WORKSPACE_TABS.has(hash) ? hash : WORKSPACE_TABS.has(path) ? path : 'live'; }
+function tabUrl(tab) { const current=new URL(location.href); current.pathname=tab==='live' ? '/' : `/${tab}`; current.hash=''; return current; }
+function setTab(tab,{updateUrl=true}={}) { const safeTab=WORKSPACE_TABS.has(tab) ? tab : 'live'; document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===safeTab)); document.querySelectorAll('[data-rail-tab]').forEach(button=>{const active=button.dataset.railTab===safeTab;button.classList.toggle('active',active);button.setAttribute('aria-current',active?'page':'false');}); $('liveView').classList.toggle('hidden',safeTab!=='live'); $('archiveView').classList.toggle('hidden',safeTab!=='archive'); $('analyticsView').classList.toggle('hidden',safeTab!=='analytics'); if(updateUrl) history.pushState({},'',tabUrl(safeTab)); if(safeTab==='archive') refreshArchives(); if(safeTab==='analytics') refreshAnalytics(); }
 document.querySelectorAll('[data-tab]').forEach(button=>button.addEventListener('click',()=>setTab(button.dataset.tab)));
 document.querySelectorAll('[data-rail-tab]').forEach(button=>button.addEventListener('click',()=>setTab(button.dataset.railTab)));
+window.addEventListener('popstate',()=>setTab(tabFromLocation(),{updateUrl:false}));
+window.addEventListener('hashchange',()=>setTab(tabFromLocation(),{updateUrl:false}));
 $('audioToggle').addEventListener('click',()=>{ void toggleLiveAudio(); });
 $('workerForm').addEventListener('submit',event=>{event.preventDefault();setWorker($('worker').value);}); $('feed').addEventListener('load',()=>{ if(liveState.streaming){ feedReady=true; $('offline').classList.add('hidden'); } }); $('feed').addEventListener('error',()=>{ feedReady=false; if(liveState.streaming) setTimeout(()=>{ $('feed').src=url(`/stream/${encodeURIComponent(worker)}.mjpg`); },750); setTimeout(refreshStatus,500); });
 archivePlayers().forEach(video=>video.addEventListener('error',()=>recoverArchiveMedia(video)));
 // Keep the public viewer responsive to a worker entering UVC mode. This is
 // status-only traffic; the image still streams continuously over MJPEG.
-refreshStatus(); refreshTranscript(); setInterval(refreshStatus,500); setInterval(refreshTranscript,1250); setInterval(()=>{if(!$('archiveView').classList.contains('hidden'))refreshArchives(); if(!$('analyticsView').classList.contains('hidden'))refreshAnalytics();},5000);
+setTab(tabFromLocation(),{updateUrl:false}); refreshStatus(); refreshTranscript(); setInterval(refreshStatus,500); setInterval(refreshTranscript,1250); setInterval(()=>{if(!$('archiveView').classList.contains('hidden'))refreshArchives(); if(!$('analyticsView').classList.contains('hidden'))refreshAnalytics();},5000);
 </script>
 </body>
 </html>

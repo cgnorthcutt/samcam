@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a clean, speech-first MP4 from an archived Sam Cam recording.
+"""Create a clean, speech-first MP4 from an archived Ego Capture recording.
 
 This is intentionally an *offline* utility.  It never opens a capture device,
 does not affect the live relay, and leaves the source recording untouched.

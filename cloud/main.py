@@ -1,4 +1,4 @@
-"""Public Sam Cam relay, live transcript, and session archive.
+"""Egocentric Camera Lab relay, live transcript, and session archive.
 
 The body camera remains attached to a worker laptop.  The laptop makes one
 outbound WebSocket connection to this service, which relays live JPEG frames
@@ -44,8 +44,10 @@ ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
 LIVE_AUDIO_MAGIC = b"SCAU"
 LIVE_AUDIO_HISTORY_PACKETS = 80
+DEFAULT_ARCHIVE_TABLE_PREFIX = "egocapture_archive"
+ARCHIVE_TABLE_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,50}$")
 ARCHIVE_DATABASE_RETRY_SECONDS = max(
-    1.0, float(os.environ.get("SAMCAM_ARCHIVE_DATABASE_RETRY_SECONDS", "5"))
+    1.0, float(os.environ.get("EGOCAPTURE_ARCHIVE_DATABASE_RETRY_SECONDS", "5"))
 )
 
 
@@ -92,6 +94,48 @@ def missing_archive_parent(exc: Exception) -> bool:
     return getattr(exc, "sqlstate", None) == "23503"
 
 
+def archive_table_prefix() -> str:
+    """Return the archive-table prefix configured for this deployment.
+
+    A deployment can point at an existing archive by setting this environment
+    variable.  Keeping that compatibility mapping in deployment configuration
+    lets the public project remain independently named while retaining its
+    already-persisted recordings.
+    """
+    prefix = os.environ.get(
+        "EGOCAPTURE_ARCHIVE_TABLE_PREFIX", DEFAULT_ARCHIVE_TABLE_PREFIX
+    ).strip()
+    if not ARCHIVE_TABLE_PREFIX_PATTERN.fullmatch(prefix):
+        raise RuntimeError("EGOCAPTURE_ARCHIVE_TABLE_PREFIX is invalid")
+    return prefix
+
+
+class ArchiveConnection:
+    """Small asyncpg adapter that applies the configured archive namespace."""
+
+    def __init__(self, connection: Any, table_prefix: str) -> None:
+        self._connection = connection
+        self._table_prefix = table_prefix
+
+    def _query(self, query: str) -> str:
+        return query.replace(DEFAULT_ARCHIVE_TABLE_PREFIX, self._table_prefix)
+
+    async def execute(self, query: str, *args: Any) -> Any:
+        return await self._connection.execute(self._query(query), *args)
+
+    async def fetch(self, query: str, *args: Any) -> Any:
+        return await self._connection.fetch(self._query(query), *args)
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        return await self._connection.fetchrow(self._query(query), *args)
+
+    async def executemany(self, query: str, args: Any) -> Any:
+        return await self._connection.executemany(self._query(query), args)
+
+    def transaction(self) -> Any:
+        return self._connection.transaction()
+
+
 class ArchiveStore:
     """Postgres-backed archive with an explicit local-development fallback."""
 
@@ -99,6 +143,7 @@ class ArchiveStore:
         self.pool: Any | None = None
         self.error: str | None = None
         self.database_url = os.environ.get("DATABASE_URL", "").strip()
+        self.table_prefix = archive_table_prefix()
         # No DATABASE_URL is a deliberate local-development configuration. A
         # configured-but-unreachable database is *not* an acceptable fallback
         # for public archive reads: it would make durable sessions disappear.
@@ -129,10 +174,11 @@ class ArchiveStore:
             candidate = await asyncpg.create_pool(
                 self.database_url, min_size=1, max_size=3, command_timeout=30
             )
-            async with candidate.acquire() as connection:
+            async with candidate.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS samcam_archive_sessions (
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_sessions (
                         session_id TEXT PRIMARY KEY,
                         worker_name TEXT NOT NULL,
                         source TEXT,
@@ -141,10 +187,10 @@ class ArchiveStore:
                         ended_at DOUBLE PRECISION,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
-                    ALTER TABLE samcam_archive_sessions
+                    ALTER TABLE egocapture_archive_sessions
                         ADD COLUMN IF NOT EXISTS capture_device TEXT;
-                    CREATE TABLE IF NOT EXISTS samcam_archive_segments (
-                        session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_segments (
+                        session_id TEXT NOT NULL REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         sequence INTEGER NOT NULL,
                         started_at DOUBLE PRECISION NOT NULL,
                         duration_seconds DOUBLE PRECISION NOT NULL,
@@ -153,60 +199,60 @@ class ArchiveStore:
                         size_bytes INTEGER NOT NULL,
                         PRIMARY KEY (session_id, sequence)
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_transcripts (
-                        session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_transcripts (
+                        session_id TEXT NOT NULL REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         line_key TEXT NOT NULL,
                         started_at DOUBLE PRECISION NOT NULL,
                         received_at DOUBLE PRECISION NOT NULL,
                         text TEXT NOT NULL,
                         PRIMARY KEY (session_id, line_key)
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_recording_chunks (
-                        session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_recording_chunks (
+                        session_id TEXT NOT NULL REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         chunk_index INTEGER NOT NULL,
                         data BYTEA NOT NULL,
                         size_bytes INTEGER NOT NULL,
                         PRIMARY KEY (session_id, chunk_index)
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_recordings (
-                        session_id TEXT PRIMARY KEY REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_recordings (
+                        session_id TEXT PRIMARY KEY REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         content_type TEXT NOT NULL,
                         chunk_count INTEGER NOT NULL,
                         size_bytes BIGINT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_original_recording_chunks (
-                        session_id TEXT NOT NULL REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_original_recording_chunks (
+                        session_id TEXT NOT NULL REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         chunk_index INTEGER NOT NULL,
                         data BYTEA NOT NULL,
                         size_bytes INTEGER NOT NULL,
                         PRIMARY KEY (session_id, chunk_index)
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_original_recordings (
-                        session_id TEXT PRIMARY KEY REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_original_recordings (
+                        session_id TEXT PRIMARY KEY REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         content_type TEXT NOT NULL,
                         chunk_count INTEGER NOT NULL,
                         size_bytes BIGINT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_analytics (
-                        session_id TEXT PRIMARY KEY REFERENCES samcam_archive_sessions(session_id) ON DELETE CASCADE,
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_analytics (
+                        session_id TEXT PRIMARY KEY REFERENCES egocapture_archive_sessions(session_id) ON DELETE CASCADE,
                         payload JSONB NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
-                    CREATE TABLE IF NOT EXISTS samcam_archive_deleted_sessions (
+                    CREATE TABLE IF NOT EXISTS egocapture_archive_deleted_sessions (
                         session_id TEXT PRIMARY KEY,
                         deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
-                    CREATE INDEX IF NOT EXISTS samcam_archive_sessions_worker_idx
-                        ON samcam_archive_sessions (worker_name, started_at DESC);
-                    CREATE INDEX IF NOT EXISTS samcam_archive_transcripts_session_idx
-                        ON samcam_archive_transcripts (session_id, started_at);
+                    CREATE INDEX IF NOT EXISTS egocapture_archive_sessions_worker_idx
+                        ON egocapture_archive_sessions (worker_name, started_at DESC);
+                    CREATE INDEX IF NOT EXISTS egocapture_archive_transcripts_session_idx
+                        ON egocapture_archive_transcripts (session_id, started_at);
                     """
                 )
                 deleted = await connection.fetch(
-                    "SELECT session_id FROM samcam_archive_deleted_sessions"
+                    "SELECT session_id FROM egocapture_archive_deleted_sessions"
                 )
                 self.deleted_session_ids = {str(row["session_id"]) for row in deleted}
             self.pool = candidate
@@ -323,17 +369,18 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     """
-                    INSERT INTO samcam_archive_sessions
+                    INSERT INTO egocapture_archive_sessions
                       (session_id, worker_name, source, capture_device, started_at, ended_at)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (session_id) DO UPDATE SET
                       worker_name = EXCLUDED.worker_name,
-                      source = COALESCE(EXCLUDED.source, samcam_archive_sessions.source),
-                      capture_device = COALESCE(EXCLUDED.capture_device, samcam_archive_sessions.capture_device),
-                      started_at = LEAST(EXCLUDED.started_at, samcam_archive_sessions.started_at),
+                      source = COALESCE(EXCLUDED.source, egocapture_archive_sessions.source),
+                      capture_device = COALESCE(EXCLUDED.capture_device, egocapture_archive_sessions.capture_device),
+                      started_at = LEAST(EXCLUDED.started_at, egocapture_archive_sessions.started_at),
                       -- A new session_start has no end time and resumes an
                       -- active stream after a relay restart. Archived-session
                       -- sync carries an end time and keeps it finalized.
@@ -357,9 +404,10 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
-                    "UPDATE samcam_archive_sessions SET ended_at = $2 WHERE session_id = $1",
+                    "UPDATE egocapture_archive_sessions SET ended_at = $2 WHERE session_id = $1",
                     session_id, ended_at,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -388,10 +436,11 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     """
-                    INSERT INTO samcam_archive_segments
+                    INSERT INTO egocapture_archive_segments
                       (session_id, sequence, started_at, duration_seconds, content_type, data, size_bytes)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                     ON CONFLICT (session_id, sequence) DO NOTHING
@@ -436,8 +485,8 @@ class ArchiveStore:
             self.memory_original_recording_chunks if original else self.memory_recording_chunks
         )
         table = (
-            "samcam_archive_original_recording_chunks"
-            if original else "samcam_archive_recording_chunks"
+            "egocapture_archive_original_recording_chunks"
+            if original else "egocapture_archive_recording_chunks"
         )
         label = "original archive recording" if original else "archive recording"
         if not self.database_required:
@@ -445,7 +494,8 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     f"""
                     INSERT INTO {table} (session_id, chunk_index, data, size_bytes)
@@ -486,12 +536,12 @@ class ArchiveStore:
             self.memory_original_recordings if original else self.memory_recordings
         )
         chunks_table = (
-            "samcam_archive_original_recording_chunks"
-            if original else "samcam_archive_recording_chunks"
+            "egocapture_archive_original_recording_chunks"
+            if original else "egocapture_archive_recording_chunks"
         )
         recordings_table = (
-            "samcam_archive_original_recordings"
-            if original else "samcam_archive_recordings"
+            "egocapture_archive_original_recordings"
+            if original else "egocapture_archive_recordings"
         )
         label = "original archive recording" if original else "archive recording"
         if not self.database_required:
@@ -508,7 +558,8 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 async with connection.transaction():
                     actual = await connection.fetchrow(
                         f"""
@@ -565,10 +616,11 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     """
-                    INSERT INTO samcam_archive_analytics (session_id, payload)
+                    INSERT INTO egocapture_archive_analytics (session_id, payload)
                     VALUES ($1, $2::jsonb)
                     ON CONFLICT (session_id) DO UPDATE SET
                       payload = EXCLUDED.payload,
@@ -590,9 +642,10 @@ class ArchiveStore:
                 )
             return self.memory_analytics.get(session_id)
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 row = await connection.fetchrow(
-                    "SELECT payload FROM samcam_archive_analytics WHERE session_id = $1", session_id
+                    "SELECT payload FROM egocapture_archive_analytics WHERE session_id = $1", session_id
                 )
             if row is None:
                 return None
@@ -636,17 +689,18 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 async with connection.transaction():
                     await connection.execute(
                         """
-                        INSERT INTO samcam_archive_deleted_sessions (session_id)
+                        INSERT INTO egocapture_archive_deleted_sessions (session_id)
                         VALUES ($1)
                         ON CONFLICT (session_id) DO NOTHING
                         """,
                         session_id,
                     )
-                    await connection.execute("DELETE FROM samcam_archive_sessions WHERE session_id = $1", session_id)
+                    await connection.execute("DELETE FROM egocapture_archive_sessions WHERE session_id = $1", session_id)
         except Exception as exc:  # noqa: BLE001
             self.error = f"archive deletion failed: {exc}"[-300:]
             print(self.error, flush=True)
@@ -655,8 +709,8 @@ class ArchiveStore:
         session_id = require_session_id(session_id)
         memory_recordings = self.memory_original_recordings if original else self.memory_recordings
         memory_chunks = self.memory_original_recording_chunks if original else self.memory_recording_chunks
-        recordings_table = "samcam_archive_original_recordings" if original else "samcam_archive_recordings"
-        chunks_table = "samcam_archive_original_recording_chunks" if original else "samcam_archive_recording_chunks"
+        recordings_table = "egocapture_archive_original_recordings" if original else "egocapture_archive_recordings"
+        chunks_table = "egocapture_archive_original_recording_chunks" if original else "egocapture_archive_recording_chunks"
         label = "original archive recording" if original else "archive recording"
         if self.pool is None:
             if self.database_required:
@@ -676,7 +730,8 @@ class ArchiveStore:
                 return None
             return {**metadata, "data": data}
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 metadata = await connection.fetchrow(
                     f"SELECT content_type, chunk_count, size_bytes FROM {recordings_table} WHERE session_id = $1",
                     session_id,
@@ -728,10 +783,11 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 await connection.execute(
                     """
-                    INSERT INTO samcam_archive_transcripts
+                    INSERT INTO egocapture_archive_transcripts
                       (session_id, line_key, started_at, received_at, text)
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (session_id, line_key) DO NOTHING
@@ -775,15 +831,16 @@ class ArchiveStore:
         if self.pool is None:
             return
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 async with connection.transaction():
                     await connection.execute(
-                        "DELETE FROM samcam_archive_transcripts WHERE session_id = $1", session_id
+                        "DELETE FROM egocapture_archive_transcripts WHERE session_id = $1", session_id
                     )
                     if records:
                         await connection.executemany(
                             """
-                            INSERT INTO samcam_archive_transcripts
+                            INSERT INTO egocapture_archive_transcripts
                               (session_id, line_key, started_at, received_at, text)
                             VALUES ($1, $2, $3, $4, $5)
                             """,
@@ -840,26 +897,27 @@ class ArchiveStore:
                 key=lambda item: float(item["started_at"]), reverse=True,
             )
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 rows = await connection.fetch(
                     """
                     SELECT s.session_id, s.worker_name, s.source, s.capture_device, s.started_at, s.ended_at,
-                      COALESCE((SELECT COUNT(*) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS segment_count,
-                      COALESCE((SELECT SUM(g.size_bytes) FROM samcam_archive_segments g WHERE g.session_id = s.session_id), 0) AS size_bytes,
-                      EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
-                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
-                      EXISTS(SELECT 1 FROM samcam_archive_original_recordings r WHERE r.session_id = s.session_id) AS original_recording_ready,
-                      COALESCE((SELECT r.size_bytes FROM samcam_archive_original_recordings r WHERE r.session_id = s.session_id), 0) AS original_recording_size_bytes,
-                      EXISTS(SELECT 1 FROM samcam_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready,
-                      COALESCE((SELECT COUNT(*) FROM samcam_archive_transcripts t WHERE t.session_id = s.session_id), 0) AS transcript_count
-                    FROM samcam_archive_sessions s
+                      COALESCE((SELECT COUNT(*) FROM egocapture_archive_segments g WHERE g.session_id = s.session_id), 0) AS segment_count,
+                      COALESCE((SELECT SUM(g.size_bytes) FROM egocapture_archive_segments g WHERE g.session_id = s.session_id), 0) AS size_bytes,
+                      EXISTS(SELECT 1 FROM egocapture_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM egocapture_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
+                      EXISTS(SELECT 1 FROM egocapture_archive_original_recordings r WHERE r.session_id = s.session_id) AS original_recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM egocapture_archive_original_recordings r WHERE r.session_id = s.session_id), 0) AS original_recording_size_bytes,
+                      EXISTS(SELECT 1 FROM egocapture_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready,
+                      COALESCE((SELECT COUNT(*) FROM egocapture_archive_transcripts t WHERE t.session_id = s.session_id), 0) AS transcript_count
+                    FROM egocapture_archive_sessions s
                     WHERE LOWER(s.worker_name) = LOWER($1)
                       AND (s.ended_at IS NULL OR EXISTS (
-                        SELECT 1 FROM samcam_archive_segments g WHERE g.session_id = s.session_id
+                        SELECT 1 FROM egocapture_archive_segments g WHERE g.session_id = s.session_id
                       ) OR EXISTS (
-                        SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id
+                        SELECT 1 FROM egocapture_archive_recordings r WHERE r.session_id = s.session_id
                       ) OR EXISTS (
-                        SELECT 1 FROM samcam_archive_original_recordings r WHERE r.session_id = s.session_id
+                        SELECT 1 FROM egocapture_archive_original_recordings r WHERE r.session_id = s.session_id
                       ))
                     ORDER BY s.started_at DESC
                     LIMIT 100
@@ -897,16 +955,17 @@ class ArchiveStore:
             ]
             return result
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 session = await connection.fetchrow(
                     """
                     SELECT s.session_id, s.worker_name, s.source, s.capture_device, s.started_at, s.ended_at,
-                      EXISTS(SELECT 1 FROM samcam_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
-                      COALESCE((SELECT r.size_bytes FROM samcam_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
-                      EXISTS(SELECT 1 FROM samcam_archive_original_recordings r WHERE r.session_id = s.session_id) AS original_recording_ready,
-                      COALESCE((SELECT r.size_bytes FROM samcam_archive_original_recordings r WHERE r.session_id = s.session_id), 0) AS original_recording_size_bytes,
-                      EXISTS(SELECT 1 FROM samcam_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready
-                    FROM samcam_archive_sessions s
+                      EXISTS(SELECT 1 FROM egocapture_archive_recordings r WHERE r.session_id = s.session_id) AS recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM egocapture_archive_recordings r WHERE r.session_id = s.session_id), 0) AS recording_size_bytes,
+                      EXISTS(SELECT 1 FROM egocapture_archive_original_recordings r WHERE r.session_id = s.session_id) AS original_recording_ready,
+                      COALESCE((SELECT r.size_bytes FROM egocapture_archive_original_recordings r WHERE r.session_id = s.session_id), 0) AS original_recording_size_bytes,
+                      EXISTS(SELECT 1 FROM egocapture_archive_analytics a WHERE a.session_id = s.session_id) AS analytics_ready
+                    FROM egocapture_archive_sessions s
                     WHERE s.session_id = $1
                     """,
                     session_id,
@@ -914,10 +973,10 @@ class ArchiveStore:
                 if session is None:
                     return None
                 segments = await connection.fetch(
-                    "SELECT sequence, started_at, duration_seconds, size_bytes FROM samcam_archive_segments WHERE session_id = $1 ORDER BY sequence", session_id
+                    "SELECT sequence, started_at, duration_seconds, size_bytes FROM egocapture_archive_segments WHERE session_id = $1 ORDER BY sequence", session_id
                 )
                 transcript = await connection.fetch(
-                    "SELECT text, started_at AS started, received_at FROM samcam_archive_transcripts WHERE session_id = $1 ORDER BY started_at", session_id
+                    "SELECT text, started_at AS started, received_at FROM egocapture_archive_transcripts WHERE session_id = $1 ORDER BY started_at", session_id
                 )
             result = dict(session)
             result["segments"] = [dict(row) for row in segments]
@@ -944,9 +1003,10 @@ class ArchiveStore:
                 )
             return self.memory_segments.get((session_id, sequence))
         try:
-            async with self.pool.acquire() as connection:
+            async with self.pool.acquire() as raw_connection:
+                connection = ArchiveConnection(raw_connection, self.table_prefix)
                 row = await connection.fetchrow(
-                    "SELECT content_type, data, size_bytes FROM samcam_archive_segments WHERE session_id = $1 AND sequence = $2",
+                    "SELECT content_type, data, size_bytes FROM egocapture_archive_segments WHERE session_id = $1 AND sequence = $2",
                     session_id, sequence,
                 )
             return dict(row) if row is not None else None
@@ -1011,7 +1071,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await archive.close()
 
 
-app = FastAPI(title="Sam Cam Relay", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="Egocentric Camera Lab Relay", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -1232,6 +1292,13 @@ async def home() -> FileResponse:
     return FileResponse(STATIC / "index.html", media_type="text/html")
 
 
+@app.get("/archive")
+@app.get("/analytics")
+async def linked_workspace_view() -> FileResponse:
+    """Serve the single-page viewer for a shareable workspace tab URL."""
+    return FileResponse(STATIC / "index.html", media_type="text/html")
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     if archive.pool is not None:
@@ -1337,7 +1404,7 @@ async def worker_analytics(worker_name: str) -> JSONResponse:
         "device": {"weight_g": 93, "neck_load_newtons": 0.91, "ergonomic_score": 76},
         "frontier": [
             {"label": "Lightweight", "runtime_minutes": 120, "weight_g": 74, "ergonomic_score": 84},
-            {"label": "Sam Cam", "runtime_minutes": 180, "weight_g": 93, "ergonomic_score": 76},
+            {"label": "Reference camera", "runtime_minutes": 180, "weight_g": 93, "ergonomic_score": 76},
             {"label": "Extended runtime", "runtime_minutes": 240, "weight_g": 112, "ergonomic_score": 69},
         ],
         "note": "Device trade-off points are planning estimates; archive and transcription totals are measured from saved sessions.",
@@ -1471,7 +1538,7 @@ async def worker_stream(worker_name: str) -> StreamingResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async def stream() -> AsyncIterator[bytes]:
-        boundary = b"samcamframe"
+        boundary = b"egocaptureframe"
         sent_sequence = -1
         while True:
             state = await existing_worker(worker_name)
@@ -1485,7 +1552,7 @@ async def worker_stream(worker_name: str) -> StreamingResponse:
             yield b"\r\n"
             await asyncio.sleep(0.15)
 
-    return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=samcamframe", headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
+    return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=egocaptureframe", headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 @app.websocket("/ws/live-audio/{worker_name}")

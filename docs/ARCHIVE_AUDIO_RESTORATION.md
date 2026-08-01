@@ -1,7 +1,15 @@
 # Offline archive audio restoration
 
+> Current archive playback deliberately uses the camera's original captured
+> audio. Do not publish a `recording.restored.mp4` as the default viewer source.
+> To repair an older playback MP4 from its retained original camera-audio
+> packets without applying any DSP, run
+> `python3 sync_archive_playback_audio.py archives` instead. It validates both
+> the copied AAC packet hashes and copied video packet hashes before replacing
+> a local playback file.
+
 `restore_archive_audio.py` is a reusable **offline-only** post-processing step
-for completed Sam Cam recordings. It does not run in the browser, does not
+for completed Ego Capture recordings. It does not run in the browser, does not
 touch `cloud/static`, and is never used by the live capture or WebSocket relay.
 Use it after a session has ended when the final playback needs the clearest
 possible speech track.
