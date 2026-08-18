@@ -39,6 +39,7 @@ from transcript_quality import (
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+PROTECTED = HERE / "protected"
 CACHE = HERE / ".cache"
 # Drop any video in here and it joins the library alongside the camera's own
 # clips -- useful for demoing the stream without the camera attached.
@@ -52,8 +53,6 @@ VIDEO_EXTS = {".avi", ".mov", ".mp4"}
 # the real bottleneck is reading off the camera's USB 2.0 bus.
 TARGET_WIDTH = 1280
 VIDEO_BITRATE = "4M"
-
-
 def which_or_die(binary: str) -> str:
     path = shutil.which(binary)
     if not path:
@@ -1752,7 +1751,13 @@ class Handler(BaseHTTPRequestHandler):
     def send_error_json(self, status: int, message: str) -> None:
         self.send_json({"error": message}, status=status)
 
-    def send_file(self, path: Path, content_type: str | None = None, download: bool = False) -> None:
+    def send_file(
+        self,
+        path: Path,
+        content_type: str | None = None,
+        download: bool = False,
+        no_store: bool = False,
+    ) -> None:
         """Serve a file with range support so the player can seek."""
         try:
             size = path.stat().st_size
@@ -1787,6 +1792,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
+        if no_store:
+            self.send_header("Cache-Control", "no-store, private")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
+                "base-uri 'none'",
+            )
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         if download:
@@ -1884,11 +1901,22 @@ class Handler(BaseHTTPRequestHandler):
         return self.library.get(clip_id)
 
     # -- routes ----------------------------------------------------------
+    def do_POST(self) -> None:  # noqa: N802
+        self.send_error_json(404, "not found")
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
 
         if path == "/":
             self.send_file(STATIC / "index.html", "text/html; charset=utf-8")
+            return
+
+        if path == "/vision":
+            self.send_file(
+                PROTECTED / "samsara-labs-vision.html",
+                "text/html; charset=utf-8",
+                no_store=True,
+            )
             return
 
         if path == "/api/status":
