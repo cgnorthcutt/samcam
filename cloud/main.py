@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+PROTECTED = HERE / "protected"
 MAX_FRAME_BYTES = 5_000_000
 MAX_LIVE_AUDIO_PACKET_BYTES = 64_000
 MAX_ARCHIVE_SEGMENT_BYTES = 8_000_000
@@ -49,6 +50,25 @@ ARCHIVE_TABLE_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,50}$")
 ARCHIVE_DATABASE_RETRY_SECONDS = max(
     1.0, float(os.environ.get("EGOCAPTURE_ARCHIVE_DATABASE_RETRY_SECONDS", "5"))
 )
+
+def private_html(path: Path) -> FileResponse:
+    """Serve the encrypted editorial shell without browser/proxy caching."""
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, private",
+            "Content-Security-Policy": (
+                "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
+                "base-uri 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+        },
+    )
 
 
 class ArchiveUnavailable(RuntimeError):
@@ -1297,6 +1317,11 @@ async def home() -> FileResponse:
 async def linked_workspace_view() -> FileResponse:
     """Serve the single-page viewer for a shareable workspace tab URL."""
     return FileResponse(STATIC / "index.html", media_type="text/html")
+
+
+@app.get("/vision")
+async def samsara_labs_vision() -> FileResponse:
+    return private_html(PROTECTED / "samsara-labs-vision.html")
 
 
 @app.get("/healthz")
