@@ -35,7 +35,7 @@ class SamsaraLabsVisionTests(unittest.TestCase):
             self.assertNotIn('class="roadmap-chart"', locked.text.lower())
             self.assertNotIn("Customer value and data", locked.text)
             self.assertEqual(locked.headers["cache-control"], "no-store, private")
-            self.assertIn('/static/samsara-labs-vision.css?v=21', locked.text)
+            self.assertIn('/static/samsara-labs-vision.css?v=22', locked.text)
 
             old_route = client.get("/samsara-labs-vision")
             self.assertEqual(old_route.status_code, 404)
