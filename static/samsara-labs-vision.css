@@ -9,8 +9,8 @@
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-body { margin: 0; overflow-x: hidden; background: #000; color: var(--white); font-family: var(--sans); line-height: 1.55; -webkit-font-smoothing: antialiased; }
+html { width: 100%; max-width: 100%; scroll-behavior: smooth; }
+body { width: 100%; max-width: 100%; margin: 0; overflow-x: hidden; background: #000; color: var(--white); font-family: var(--sans); line-height: 1.55; -webkit-font-smoothing: antialiased; }
 button, input { font: inherit; }
 button { color: inherit; }
 
@@ -44,16 +44,17 @@ button { color: inherit; }
 
 .brand { display: inline-flex; min-width: 0; align-items: center; gap: 10px; color: #fff; font-size: 13px; font-weight: 650; letter-spacing: .04em; text-decoration: none; pointer-events: auto; text-shadow: 0 1px 14px rgb(0 0 0 / 70%); }
 .brand svg { width: 34px; height: 34px; fill: none; stroke: #fff; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.65; }
+.brand-name { display: flex; min-width: 0; flex-wrap: wrap; gap: 0 .38em; }
+.brand-name > span { white-space: nowrap; }
 .authorship-note { color: rgb(255 255 255 / 82%); font-size: 10px; font-weight: 650; letter-spacing: .06em; text-shadow: 0 1px 14px rgb(0 0 0 / 78%); white-space: nowrap; }
-.topbar-action { flex: 0 0 auto; min-height: 34px; padding: 0 14px; border: 1px solid rgb(255 255 255 / 58%); background: rgb(0 0 0 / 22%); cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; pointer-events: auto; }
-.topbar-action:hover { background: #fff; color: #111; }
-.topbar-action:focus-visible, .brand:focus-visible, input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.brand:focus-visible, input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 
 .cover,
 .manifesto-section {
   position: relative;
   display: grid;
   min-height: 100svh;
+  grid-template-columns: minmax(0, 1fr);
   align-items: end;
   isolation: isolate;
   overflow: hidden;
@@ -109,6 +110,7 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 .chart-scroll { width: 100%; overflow-x: auto; overflow-y: hidden; overscroll-behavior-inline: contain; scrollbar-color: #777 transparent; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .chart-scroll:focus-visible, .bets-chart:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 .roadmap-chart { display: block; width: 100%; min-width: 1040px; height: auto; font-family: var(--sans); }
+.roadmap-mobile { display: none; }
 .grid-lines line { stroke: rgb(255 255 255 / 20%); stroke-dasharray: 3 5; }
 .axis-labels, .date-labels { fill: rgb(255 255 255 / 78%); font-size: 12px; font-weight: 650; }
 .axis-title, .x-axis-title { fill: rgb(255 255 255 / 72%); font-size: 11px; font-weight: 750; letter-spacing: .16em; }
@@ -140,17 +142,22 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 .step-sublist { margin: 8px 0 0; padding-left: 17px; }
 .phase-column .steps .step-sublist li { padding: 0; border: 0; color: rgb(255 255 255 / 76%); font-size: inherit; line-height: 1.45; }
 
+.bets-panel, .bets-collection, .bet-item, .bet-statement, .bets-chart, .robot-proof, .robot-proof-media, .robot-proof figcaption { min-width: 0; max-width: 100%; }
+.bets-panel { overflow: hidden; }
 .bets-panel h2 { max-width: none; font-size: clamp(34px, 4vw, 54px); }
 .bets-collection { margin-top: 30px; }
 .bet-item { padding: clamp(24px, 3vw, 38px) 0; border-top: 1px solid var(--line); }
-.bet-statement { max-width: 980px; margin: 0; color: rgb(255 255 255 / 88%); font-size: clamp(16px, 1.5vw, 20px); line-height: 1.55; }
+.bet-statement { max-width: 980px; margin: 0; color: rgb(255 255 255 / 88%); font-size: clamp(16px, 1.5vw, 20px); line-height: 1.55; overflow-wrap: break-word; }
 .bet-number { margin-right: .5em; color: #fff; font-family: var(--serif); }
 .bets-chart { width: min(980px, 100%); min-width: 0; margin: 24px auto 0; }
 .bets-curve-chart { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--sans); }
+.bets-curve-chart-mobile { display: none; width: 100%; height: auto; font-family: var(--sans); }
 .bets-grid-lines line { stroke: rgb(255 255 255 / 18%); stroke-width: 1; }
 .bets-curve { fill: none; stroke: #5ba6ff; stroke-linecap: round; stroke-width: 4; }
 .bets-chart-annotations { fill: #ff625e; font-size: 18px; font-weight: 600; }
 .bets-chart-annotations path { fill: none; stroke: #ff3f35; stroke-linecap: round; stroke-width: 5; }
+.bets-mobile-annotations { fill: #ff625e; font-size: 15px; font-weight: 600; }
+.bets-mobile-annotations path { fill: none; stroke: #ff3f35; stroke-linecap: round; stroke-width: 4; }
 
 .robot-proof { width: min(1040px, 100%); margin: 0 auto; padding: 0; background: transparent; }
 .robot-proof-media { position: relative; margin-inline: clamp(50px, 6vw, 96px); overflow: hidden; }
@@ -194,12 +201,92 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 
 @media (max-width: 900px) {
   .scene-roadmap { padding: 76px 18px 12px; }
+  .chart-scroll { display: none; }
+  .roadmap-mobile {
+    display: block;
+    width: 100%;
+    max-width: 620px;
+    margin: 0 auto;
+    padding: 4px 18px 0;
+    list-style: none;
+  }
+  .roadmap-mobile li {
+    display: grid;
+    min-width: 0;
+    min-height: 57px;
+    grid-template-columns: 58px 18px minmax(0, 1fr);
+    column-gap: 9px;
+    align-items: start;
+  }
+  .roadmap-mobile time {
+    padding-top: 1px;
+    color: rgb(255 255 255 / 72%);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    line-height: 1.18;
+    text-align: right;
+  }
+  .roadmap-mobile time span { display: block; }
+  .roadmap-mobile i { position: relative; align-self: stretch; min-height: 57px; }
+  .roadmap-mobile i::before {
+    position: absolute;
+    top: 7px;
+    bottom: -7px;
+    left: 50%;
+    width: 2px;
+    transform: translateX(-50%);
+    background: rgb(255 255 255 / 72%);
+    content: "";
+  }
+  .roadmap-mobile i::after {
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    width: 11px;
+    height: 11px;
+    transform: translateX(-50%);
+    border: 2px solid #fff;
+    border-radius: 50%;
+    background: #111;
+    content: "";
+  }
+  .roadmap-mobile li:first-child i::after { width: 7px; height: 7px; top: 5px; }
+  .roadmap-mobile li:last-child i::before { bottom: auto; height: 8px; }
+  .roadmap-mobile li > div {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 0 18px;
+  }
+  .roadmap-mobile strong {
+    min-width: 0;
+    color: #fff;
+    font-family: var(--serif);
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.12;
+    overflow-wrap: anywhere;
+  }
+  .roadmap-mobile-progress {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding-top: 2px;
+    color: rgb(255 255 255 / 68%);
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: .05em;
+  }
   .phase-overview { min-height: auto; padding: 18px 18px 90px; }
   .phase-grid { grid-template-columns: 1fr; }
   .phase-column h2 { font-size: 34px; white-space: normal; }
   .phase-column .steps li { font-size: 14px; }
-  .bets-chart { overflow-x: auto; }
-  .bets-curve-chart { min-width: 620px; }
+  .scene-bets { overflow: hidden; }
+  .bets-chart { width: 100%; overflow: hidden; }
+  .bets-curve-chart-desktop { display: none; }
+  .bets-curve-chart-mobile { display: block; max-width: 460px; margin-inline: auto; overflow: hidden; }
 }
 
 @media (max-width: 640px) {
@@ -212,12 +299,10 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
       8px
       max(14px, env(safe-area-inset-left));
   }
-  .brand { gap: 8px; }
+  .brand { flex: 1 1 auto; gap: 8px; overflow: hidden; }
   .brand svg { flex: 0 0 auto; width: 29px; height: 29px; }
-  .brand span { max-width: 150px; font-size: 10px; line-height: 1.15; }
+  .brand-name { max-width: none; font-size: 10px; line-height: 1.15; }
   .authorship-note { max-width: 82px; font-size: 8px; line-height: 1.25; text-align: right; white-space: normal; }
-  .topbar-action { min-height: 32px; padding-inline: 12px; }
-
   .cover, .manifesto-section { padding: 82px 14px 48px; background-attachment: scroll; }
   .teaser-cover { min-height: 108svh; }
   h1 { font-size: clamp(46px, 14vw, 62px); line-height: 1.01; text-wrap: balance; }
@@ -234,7 +319,7 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
   .scene-roadmap .content-panel { width: 100%; padding: 24px 0 18px; }
   .scene-roadmap .section-heading { margin: 0 0 14px; padding-inline: 18px; }
   .scene-roadmap .section-heading h2 { max-width: 390px; font-size: clamp(29px, 9vw, 36px); line-height: 1.05; }
-  .chart-scroll { padding-inline: 18px; scroll-padding-inline: 18px; }
+  .roadmap-mobile { padding-inline: 18px; }
 
   .phase-overview { padding: 16px 14px 72px; }
   .phase-overview-title { margin-bottom: 14px; font-size: 26px; }
@@ -244,12 +329,13 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
   .phase-column .steps li { padding: 9px 0 9px 4px; font-size: 15px; line-height: 1.5; overflow-wrap: break-word; }
   .step-sublist { margin-top: 7px; padding-left: 14px; }
 
-  .bets-panel h2 { font-size: 32px; line-height: 1.05; }
+  .scene-bets { padding-inline: 14px; }
+  .scene-bets .bets-panel { width: 100%; max-width: 100%; min-width: 0; padding: 26px 18px; overflow: hidden; }
+  .bets-panel h2 { width: 100%; max-width: 100%; font-size: clamp(28px, 8.5vw, 34px); line-height: 1.05; overflow-wrap: break-word; }
   .bets-collection { margin-top: 24px; }
   .bet-item { padding: 24px 0; }
   .bet-statement, .robot-proof figcaption { font-size: 16px; line-height: 1.55; }
-  .bets-chart { overflow-x: auto; overscroll-behavior-inline: contain; margin-top: 18px; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
-  .bets-curve-chart { min-width: 560px; }
+  .bets-chart { margin-top: 18px; }
   .robot-proof-media { margin-inline: 0; }
   .robot-proof-overlay { top: auto; bottom: 0; padding: 8px 10px; transform: none; font-size: clamp(12px, 3.8vw, 15px); letter-spacing: .035em; line-height: 1.2; }
   .robot-proof figcaption { margin-top: 16px; }
@@ -267,7 +353,7 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 
 @media (max-width: 360px) {
   .authorship-note { display: none; }
-  .brand span { max-width: 220px; }
+  .brand-name { max-width: none; }
 }
 
 @media (max-height: 520px) {
