@@ -10,6 +10,8 @@ after the live publisher disconnects or this service redeploys.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import re
@@ -26,7 +28,7 @@ except ImportError:  # pragma: no cover - exercised only by a minimal local inst
     asyncpg = None  # type: ignore[assignment]
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
@@ -45,22 +47,41 @@ ARCHIVE_RECORDING_MAGIC = b"SCAR"
 ARCHIVE_ORIGINAL_RECORDING_MAGIC = b"SCOR"
 LIVE_AUDIO_MAGIC = b"SCAU"
 LIVE_AUDIO_HISTORY_PACKETS = 80
+VISION_COOKIE_NAME = "__Secure-samcam_vision_unlock"
+VISION_COOKIE_MAX_AGE = 365 * 24 * 60 * 60
+VISION_KEY_PLACEHOLDER = "__VISION_SERVER_UNLOCK_KEY__"
 DEFAULT_ARCHIVE_TABLE_PREFIX = "egocapture_archive"
 ARCHIVE_TABLE_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,50}$")
 ARCHIVE_DATABASE_RETRY_SECONDS = max(
     1.0, float(os.environ.get("EGOCAPTURE_ARCHIVE_DATABASE_RETRY_SECONDS", "5"))
 )
 
-def private_html(path: Path) -> FileResponse:
+def valid_vision_unlock_key(value: object) -> str | None:
+    """Return a canonical encrypted-article key only when it is 32 bytes."""
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return value if len(decoded) == 32 else None
+
+
+def private_html(path: Path, unlock_key: str | None = None) -> HTMLResponse:
     """Serve the encrypted editorial shell without browser/proxy caching."""
-    return FileResponse(
-        path,
+    html = path.read_text(encoding="utf-8").replace(
+        VISION_KEY_PLACEHOLDER, json.dumps(unlock_key)
+    )
+    return HTMLResponse(
+        html,
         media_type="text/html",
         headers={
             "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "Vary": "Cookie",
             "Content-Security-Policy": (
                 "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; "
+                "img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; "
                 "base-uri 'none'"
             ),
             "Referrer-Policy": "no-referrer",
@@ -1320,8 +1341,57 @@ async def linked_workspace_view() -> FileResponse:
 
 
 @app.get("/vision")
-async def samsara_labs_vision() -> FileResponse:
-    return private_html(PROTECTED / "samsara-labs-vision.html")
+async def samsara_labs_vision(request: Request) -> HTMLResponse:
+    saved_key = request.cookies.get(VISION_COOKIE_NAME)
+    unlock_key = valid_vision_unlock_key(saved_key)
+    response = private_html(PROTECTED / "samsara-labs-vision.html", unlock_key)
+    if saved_key and unlock_key is None:
+        response.delete_cookie(
+            VISION_COOKIE_NAME,
+            path="/vision",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    return response
+
+
+@app.post("/vision/session", status_code=204)
+async def remember_samsara_labs_vision(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="invalid unlock key")
+    unlock_key = valid_vision_unlock_key(body.get("key") if isinstance(body, dict) else None)
+    if unlock_key is None:
+        raise HTTPException(status_code=400, detail="invalid unlock key")
+
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        VISION_COOKIE_NAME,
+        unlock_key,
+        max_age=VISION_COOKIE_MAX_AGE,
+        path="/vision",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/vision/session/clear", status_code=204)
+async def forget_samsara_labs_vision() -> Response:
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    response.delete_cookie(
+        VISION_COOKIE_NAME,
+        path="/vision",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    response.delete_cookie("vision_unlock", path="/", secure=True, samesite="lax")
+    response.delete_cookie("vision_unlock", path="/vision", secure=True, samesite="lax")
+    return response
 
 
 @app.get("/healthz")
