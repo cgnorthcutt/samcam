@@ -12,6 +12,8 @@ class SamsaraLabsVisionTests(unittest.TestCase):
             locked = client.get("/vision")
             self.assertEqual(locked.status_code, 200)
             self.assertIn("Vision: Robotic OS and 100B+", locked.text)
+            self.assertIn("August 2026 · Curtis Northcutt", locked.text)
+            self.assertIn("Samsara AI Labs · Special Projects", locked.text)
             self.assertNotIn("Private draft", locked.text)
             self.assertIn('/static/samsara-labs-logo.svg', locked.text)
             self.assertIn('localStorage.setItem(cookieName, encoded)', locked.text)

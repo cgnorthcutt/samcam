@@ -101,6 +101,9 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 40px; margin-bottom: 32px; }
 .section-heading > p { max-width: 240px; margin: 0; color: var(--muted); font-size: 11px; text-align: right; }
+.scene-roadmap { min-height: auto; padding-top: clamp(88px, 10vh, 110px); padding-bottom: 18px; }
+.scene-roadmap .content-panel { padding: clamp(24px, 3vw, 38px); }
+.scene-roadmap .section-heading { margin-bottom: 12px; }
 
 .chart-scroll { overflow-x: auto; scrollbar-color: #777 transparent; }
 .roadmap-chart { display: block; width: 100%; min-width: 1040px; height: auto; font-family: var(--sans); }
@@ -110,13 +113,14 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 .roadmap-line { fill: none; stroke: #fff; stroke-linecap: round; stroke-width: 4; }
 .milestones circle { fill: #111; stroke: #fff; stroke-width: 3; }
 .milestones text { fill: #fff; font-family: var(--serif); font-size: 14px; font-weight: 600; text-anchor: start; paint-order: stroke; stroke: #111; stroke-linejoin: round; stroke-width: 5px; }
+.milestones text.milestone-label-left { text-anchor: end; }
 
 .steps { max-width: 760px; margin: 36px 0 0; padding: 0 0 0 25px; }
 .steps li { padding: 13px 0 13px 12px; border-top: 1px solid var(--line); color: rgb(255 255 255 / 86%); font-size: clamp(14px, 1.4vw, 17px); }
 .steps li::marker { color: #fff; font-family: var(--serif); font-size: 13px; }
 .steps b { color: #fff; font-weight: 700; }
 
-.phase-overview { padding: 82px max(16px, calc((100vw - 1420px) / 2)) 28px; }
+.phase-overview { min-height: auto; padding: 20px max(16px, calc((100vw - 1420px) / 2)) 28px; }
 .phase-overview-content { width: 100%; }
 .phase-overview-title { margin: 0 0 18px; font-family: var(--sans); font-size: 28px; font-weight: 650; letter-spacing: -.02em; line-height: 1; }
 .phase-grid {
@@ -181,7 +185,8 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 }
 
 @media (max-width: 900px) {
-  .phase-overview { min-height: auto; padding-right: 18px; padding-left: 18px; }
+  .scene-roadmap { padding: 76px 18px 12px; }
+  .phase-overview { min-height: auto; padding: 18px 18px 24px; }
   .phase-grid { grid-template-columns: 1fr; }
   .phase-column h2 { font-size: 34px; white-space: normal; }
   .phase-column .steps li { font-size: 14px; }
