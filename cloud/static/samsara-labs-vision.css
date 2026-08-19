@@ -24,9 +24,8 @@ html { scroll-behavior: smooth; }
 body {
   margin: 0;
   background:
-    radial-gradient(circle at 8% 18%, rgb(112 140 82 / 8%) 0 14%, transparent 34%),
-    radial-gradient(circle at 92% 72%, rgb(185 110 77 / 6%) 0 13%, transparent 32%),
-    var(--paper);
+    linear-gradient(rgb(8 34 26 / 68%), rgb(8 34 26 / 68%)),
+    url("/static/samlabs/04-warehouse.webp") center / cover fixed;
   color: var(--ink);
   font-family: var(--sans);
   line-height: 1.6;
@@ -121,6 +120,27 @@ a { color: inherit; }
 .lock-button:hover { border-color: rgb(231 238 214 / 48%); background: rgb(255 255 255 / 11%); }
 .lock-button:focus-visible, .vision-brand:focus-visible, input:focus-visible { outline: 3px solid #cfb970; outline-offset: 3px; }
 
+.unlock-jump {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 13px;
+  border: 1px solid rgb(231 238 214 / 25%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  color: #e8ecdd;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.unlock-jump svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.unlock-jump:hover { border-color: rgb(231 238 214 / 52%); background: rgb(255 255 255 / 12%); }
+.unlock-jump:focus-visible, .preview-scroll-cue:focus-visible { outline: 3px solid #cfb970; outline-offset: 3px; }
+
 .hero {
   position: relative;
   display: grid;
@@ -207,6 +227,24 @@ a { color: inherit; }
 }
 
 .hero-meta span + span::before { content: "•"; margin-right: 24px; color: #7e937a; }
+
+.preview-scroll-cue {
+  position: absolute;
+  z-index: 3;
+  bottom: 24px;
+  left: max(24px, calc((100vw - 1180px) / 2));
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: #aebda9;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .16em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.preview-scroll-cue span { color: #cfdbb4; font-size: 16px; }
 
 .field-note {
   align-self: end;
@@ -404,6 +442,318 @@ h2 {
   text-transform: uppercase;
 }
 
+/* Public opening and encrypted continuation */
+.preview-boundary {
+  position: relative;
+  min-height: 1040px;
+  overflow: hidden;
+  background:
+    linear-gradient(rgb(8 34 26 / 66%), rgb(8 34 26 / 66%)),
+    url("/static/samlabs/06-excavator.webp") center / cover fixed;
+}
+
+.preview-fade-content {
+  position: relative;
+  z-index: 1;
+  height: 650px;
+  opacity: .82;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 28%, rgb(0 0 0 / 65%) 57%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 28%, rgb(0 0 0 / 65%) 57%, transparent 100%);
+}
+
+.preview-roadmap-glimpse { padding-top: 105px; }
+.preview-roadmap-glimpse h2 { max-width: 790px; }
+.preview-roadmap-glimpse .section-intro { max-width: 620px; margin-top: 25px; }
+
+.preview-vines {
+  position: relative;
+  height: 285px;
+  margin-top: 62px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    repeating-linear-gradient(to bottom, transparent 0 56px, rgb(39 65 50 / 10%) 56px 57px),
+    rgb(251 250 245 / 72%);
+}
+
+.preview-vines::before {
+  position: absolute;
+  inset: 40px 5% 40px;
+  content: "";
+  background: linear-gradient(105deg, var(--moss), var(--pine));
+  clip-path: polygon(0 89%, 19% 73%, 40% 66%, 59% 43%, 78% 31%, 100% 3%, 100% 9%, 78% 38%, 59% 50%, 40% 73%, 19% 80%, 0 96%);
+}
+
+.preview-vines span {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border: 3px solid #f8f6ec;
+  border-radius: 50%;
+  background: var(--fern);
+  box-shadow: 0 2px 8px rgb(23 62 49 / 18%);
+}
+
+.preview-vines span:nth-child(1) { left: 8%; bottom: 47px; }
+.preview-vines span:nth-child(2) { left: 28%; bottom: 83px; }
+.preview-vines span:nth-child(3) { left: 48%; bottom: 113px; }
+.preview-vines span:nth-child(4) { left: 69%; bottom: 168px; }
+.preview-vines span:nth-child(5) { right: 7%; top: 45px; }
+
+.preview-gate {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  min-height: 760px;
+  align-items: center;
+  flex-direction: column;
+  justify-content: flex-end;
+  margin-top: -365px;
+  padding: 340px 24px 105px;
+  background:
+    linear-gradient(to bottom, transparent 0%, rgb(8 36 27 / 72%) 26%, rgb(8 36 27 / 91%) 58%, rgb(8 36 27 / 94%) 100%),
+    url("/static/samlabs/06-excavator.webp") center / cover fixed;
+  color: #f4f1e5;
+}
+
+.preview-gate::before, .preview-gate::after {
+  position: absolute;
+  z-index: -1;
+  content: "";
+  border: 1px solid rgb(208 222 181 / 10%);
+  border-radius: 50%;
+}
+
+.preview-gate::before { width: 640px; height: 640px; right: -260px; bottom: -260px; box-shadow: 0 0 0 80px rgb(208 222 181 / 2%); }
+.preview-gate::after { width: 420px; height: 420px; left: -180px; bottom: -250px; box-shadow: 0 0 0 70px rgb(208 222 181 / 2%); }
+.preview-gate .login-mark { flex: 0 0 auto; }
+.preview-gate .login-card { width: min(480px, 100%); color: #f4f1e5; }
+.preview-gate .login-card h2 { margin: 0; color: #f4f1e5; font-family: var(--serif); font-size: 42px; font-weight: 400; letter-spacing: -.04em; line-height: 1.08; text-align: center; }
+.preview-gate .login-foot { margin-bottom: 0; }
+
+/* Full-bleed photographic story */
+.vision-page .hero {
+  background-image:
+    linear-gradient(112deg, rgb(7 31 24 / 92%) 0%, rgb(13 48 35 / 77%) 55%, rgb(42 72 48 / 52%) 100%),
+    url("/static/samlabs/01-smoke.webp");
+  background-position: center;
+  background-size: cover;
+  background-attachment: fixed;
+}
+
+.vision-page .opening,
+.vision-page .roadmap-section,
+.vision-page .thesis-section,
+.vision-page .bets-section,
+.vision-page .closing {
+  width: 100%;
+  min-height: 100svh;
+  max-width: none;
+  margin: 0;
+  padding-right: max(24px, calc((100vw - 1180px) / 2));
+  padding-left: max(24px, calc((100vw - 1180px) / 2));
+  background-position: center;
+  background-size: cover;
+  background-attachment: fixed;
+}
+
+.vision-page .opening {
+  display: grid;
+  align-content: center;
+  background-image:
+    linear-gradient(120deg, rgb(12 38 29 / 70%), rgb(36 64 39 / 42%)),
+    url("/static/samlabs/05-field.webp");
+}
+
+.vision-page .opening-grid {
+  padding: clamp(28px, 5vw, 58px);
+  border: 1px solid rgb(255 255 255 / 35%);
+  background: rgb(248 246 235 / 88%);
+  box-shadow: 0 30px 90px rgb(7 29 22 / 24%);
+  backdrop-filter: blur(14px);
+}
+
+.vision-page .opening > .section-kicker {
+  width: fit-content;
+  margin-bottom: 16px;
+  padding: 7px 11px;
+  background: rgb(11 42 31 / 78%);
+  color: #d4dfb9;
+}
+
+.vision-page .flywheel { background: rgb(251 250 245 / 90%); box-shadow: 0 22px 70px rgb(7 29 22 / 18%); backdrop-filter: blur(12px); }
+
+.vision-page .roadmap-section {
+  display: grid;
+  align-content: center;
+  background-image:
+    linear-gradient(120deg, rgb(10 35 27 / 78%), rgb(53 72 45 / 46%)),
+    url("/static/samlabs/06-excavator.webp");
+}
+
+.vision-page .roadmap-section > .section-head,
+.vision-page .bets-section > .section-head {
+  padding: clamp(25px, 4vw, 42px);
+  border: 1px solid rgb(255 255 255 / 28%);
+  background: rgb(248 246 235 / 89%);
+  box-shadow: 0 24px 70px rgb(7 29 22 / 20%);
+  backdrop-filter: blur(14px);
+}
+
+.vision-page .chart-card { box-shadow: 0 30px 90px rgb(5 25 19 / 30%); }
+
+.vision-page .steps-section {
+  width: 100%;
+  max-width: none;
+  padding: 100px 0 0;
+  background:
+    linear-gradient(rgb(8 34 26 / 78%), rgb(8 34 26 / 78%)),
+    url("/static/samlabs/04-warehouse.webp") center / cover fixed;
+}
+
+.vision-page .steps-section > .section-head {
+  width: min(1180px, calc(100% - 48px));
+  margin: 0 auto 70px;
+  padding: clamp(25px, 4vw, 42px);
+  border: 1px solid rgb(226 236 211 / 24%);
+  background: rgb(8 35 27 / 76%);
+  box-shadow: 0 25px 75px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(13px);
+}
+
+.vision-page .steps-section > .section-head h2,
+.vision-page .steps-section .phase-label b { color: #f7f3e8; }
+
+.vision-page .steps-section .phase { display: block; padding: 0; border: 0; }
+.vision-page .steps-section .phase-label {
+  position: static;
+  width: min(1180px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 42px 0 28px;
+  color: #dce4d8;
+}
+
+.vision-page .steps-section .phase-label small { color: #bcc9bc; }
+
+.vision-page .step-list { width: 100%; }
+
+.vision-page .step {
+  position: relative;
+  display: grid;
+  min-height: 100svh;
+  width: 100%;
+  grid-template-columns: 70px minmax(280px, 760px);
+  align-content: center;
+  justify-content: center;
+  gap: clamp(18px, 4vw, 54px);
+  isolation: isolate;
+  overflow: hidden;
+  padding: clamp(100px, 15vh, 170px) 24px;
+  border: 0;
+}
+
+.vision-page .step::before,
+.vision-page .step::after { position: absolute; inset: 0; content: ""; }
+.vision-page .step::before {
+  z-index: -2;
+  background-position: center;
+  background-size: cover;
+  background-attachment: fixed;
+  filter: saturate(.72) contrast(1.08);
+  transform: scale(1.025);
+}
+.vision-page .step::after {
+  z-index: -1;
+  background:
+    linear-gradient(to bottom, rgb(7 27 21 / 62%) 0%, transparent 18%, transparent 80%, rgb(7 27 21 / 66%) 100%),
+    linear-gradient(110deg, rgb(7 31 24 / 82%), rgb(22 57 39 / 50%) 58%, rgb(91 91 52 / 30%));
+}
+
+.vision-page .scene-01::before { background-image: url("/static/samlabs/01-smoke.webp"); }
+.vision-page .scene-02::before { background-image: url("/static/samlabs/02-mechanic.webp"); }
+.vision-page .scene-03::before { background-image: url("/static/samlabs/03-sparks.webp"); }
+.vision-page .scene-04::before { background-image: url("/static/samlabs/04-warehouse.webp"); }
+.vision-page .scene-05::before { background-image: url("/static/samlabs/05-field.webp"); }
+.vision-page .scene-06::before { background-image: url("/static/samlabs/06-excavator.webp"); }
+.vision-page .scene-07::before { background-image: url("/static/samlabs/07-sewing.webp"); }
+.vision-page .scene-08::before { background-image: url("/static/samlabs/08-factory.webp"); }
+.vision-page .scene-09::before { background-image: url("/static/samlabs/09-worker.webp"); }
+.vision-page .scene-10::before { background-image: url("/static/samlabs/10-foundry.webp"); }
+.vision-page .scene-11::before { background-image: url("/static/samlabs/11-controls.webp"); }
+.vision-page .scene-12::before { background-image: url("/static/samlabs/12-harvest.webp"); }
+
+.vision-page .step > span {
+  position: relative;
+  z-index: 1;
+  align-self: start;
+  padding-top: 24px;
+  color: #d6e0bd;
+  font-size: 42px;
+  text-shadow: 0 2px 14px rgb(0 0 0 / 55%);
+}
+
+.vision-page .step > div {
+  position: relative;
+  z-index: 1;
+  padding: clamp(28px, 5vw, 58px);
+  border: 1px solid rgb(226 236 211 / 25%);
+  background: rgb(8 35 27 / 73%);
+  box-shadow: 0 30px 90px rgb(0 0 0 / 27%);
+  backdrop-filter: blur(13px);
+}
+
+.vision-page .step h3 { color: #f7f3e8; font-size: clamp(32px, 4.3vw, 58px); letter-spacing: -.035em; }
+.vision-page .step p { max-width: 650px; color: #dce4d8; font-family: var(--serif); font-size: clamp(16px, 1.7vw, 21px); line-height: 1.7; }
+
+.vision-page .thesis-section {
+  display: grid;
+  align-content: center;
+  background-image:
+    linear-gradient(115deg, rgb(8 31 24 / 78%), rgb(19 49 34 / 48%)),
+    url("/static/samlabs/09-worker.webp");
+}
+
+.vision-page .quote-block,
+.vision-page .thesis-grid article,
+.vision-page .bets-grid article { box-shadow: 0 25px 75px rgb(5 25 19 / 23%); backdrop-filter: blur(13px); }
+
+.vision-page .bets-section {
+  display: grid;
+  align-content: center;
+  background-image:
+    linear-gradient(115deg, rgb(16 30 22 / 74%), rgb(67 50 30 / 43%)),
+    url("/static/samlabs/10-foundry.webp");
+}
+
+.vision-page .bets-grid article { background: rgb(251 250 245 / 91%); }
+
+.vision-page .closing {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding-top: 120px;
+  padding-bottom: 120px;
+  background-image:
+    linear-gradient(115deg, rgb(7 31 24 / 84%), rgb(26 61 39 / 55%)),
+    url("/static/samlabs/12-harvest.webp");
+  color: #f4f1e5;
+  text-shadow: 0 2px 18px rgb(0 0 0 / 38%);
+}
+
+.vision-page .closing h2 { max-width: 900px; color: #f7f3e8; }
+.vision-page .closing > p:not(.section-kicker) { color: #dce4d8; }
+.vision-page .closing-rule { color: #dce4d8; }
+.vision-page .closing-rule span { background: rgb(231 238 214 / 32%); }
+.vision-page .closing-mark svg { stroke: #c6d6a9; }
+
+.vision-footer {
+  border-color: rgb(226 236 211 / 18%);
+  background:
+    linear-gradient(rgb(8 34 26 / 88%), rgb(8 34 26 / 88%)),
+    url("/static/samlabs/12-harvest.webp") center / cover;
+  color: #cbd5c8;
+}
+
 /* Password gate */
 .login-page {
   display: grid;
@@ -460,6 +810,8 @@ h2 {
   .lock-button { width: 38px; padding: 0; justify-content: center; }
   .lock-button svg { width: 16px; height: 16px; }
   .lock-button { font-size: 0; }
+  .unlock-jump { width: 38px; padding: 0; justify-content: center; font-size: 0; }
+  .unlock-jump svg { width: 16px; height: 16px; }
   .hero { min-height: 760px; padding: 92px 24px 58px; }
   .hero h1 { font-size: clamp(48px, 15vw, 68px); }
   .dek { margin-top: 28px; font-size: 18px; }
@@ -489,6 +841,38 @@ h2 {
   .login-page { padding: 18px; }
   .login-card { padding: 34px 24px; }
   .login-card h1 { font-size: 37px; }
+  .preview-scroll-cue { bottom: 18px; left: 24px; }
+  .preview-boundary { min-height: 930px; }
+  .preview-fade-content { height: 560px; }
+  .preview-roadmap-glimpse { padding-top: 78px; }
+  .preview-roadmap-glimpse .section-intro { font-size: 13px; }
+  .preview-vines { height: 220px; margin-top: 45px; }
+  .preview-gate { min-height: 700px; margin-top: -300px; padding: 300px 18px 78px; }
+  .preview-gate .login-card h2 { font-size: 36px; }
+  .vision-page .hero,
+  .vision-page .opening,
+  .vision-page .roadmap-section,
+  .vision-page .thesis-section,
+  .vision-page .bets-section,
+  .vision-page .closing,
+  .preview-boundary,
+  .preview-gate,
+  body,
+  .vision-page .step::before { background-attachment: scroll; }
+  .vision-page .opening,
+  .vision-page .roadmap-section,
+  .vision-page .thesis-section,
+  .vision-page .bets-section,
+  .vision-page .closing { padding-right: 16px; padding-left: 16px; }
+  .vision-page .opening-grid { padding: 28px 22px; }
+  .vision-page .steps-section { padding-top: 78px; }
+  .vision-page .steps-section > .section-head,
+  .vision-page .steps-section .phase-label { width: calc(100% - 32px); }
+  .vision-page .step { grid-template-columns: 1fr; align-content: end; gap: 10px; padding: 94px 16px 54px; }
+  .vision-page .step > span { padding: 0 0 0 14px; font-size: 28px; }
+  .vision-page .step > div { padding: 27px 23px; }
+  .vision-page .step h3 { font-size: 36px; }
+  .vision-page .step p { font-size: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

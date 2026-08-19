@@ -6,15 +6,17 @@ from cloud.main import app
 
 
 class SamsaraLabsVisionTests(unittest.TestCase):
-    def test_private_article_is_served_only_as_ciphertext(self) -> None:
+    def test_public_preview_keeps_full_article_encrypted(self) -> None:
         with TestClient(app) as client:
             locked = client.get("/vision")
             self.assertEqual(locked.status_code, 200)
-            self.assertIn("Private field notes", locked.text)
+            self.assertIn("From fieldwork to", locked.text)
+            self.assertIn('class="preview-boundary"', locked.text)
+            self.assertIn('id="vision-unlock"', locked.text)
             self.assertIn('id="encrypted-vision"', locked.text)
             self.assertIn('"algorithm":"AES-GCM"', locked.text)
-            self.assertNotIn("<article", locked.text.lower())
-            self.assertNotIn('class="hero"', locked.text.lower())
+            self.assertNotIn('class="roadmap-chart"', locked.text.lower())
+            self.assertNotIn('class="vision-footer"', locked.text.lower())
             self.assertEqual(locked.headers["cache-control"], "no-store, private")
 
             old_route = client.get("/samsara-labs-vision")
