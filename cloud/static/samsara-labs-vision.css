@@ -887,3 +887,208 @@ h2 {
   .chart-scroll { overflow: visible; }
   .roadmap-chart { min-width: 0; }
 }
+
+/* Full-bleed editorial reset: photography is the only page background. */
+body,
+.login-page {
+  background: url("/static/samlabs/04-warehouse.webp") center / cover fixed;
+  color: #fff;
+}
+
+.vision-nav {
+  border-color: rgb(255 255 255 / 18%);
+  background: rgb(0 0 0 / 48%);
+  box-shadow: none;
+}
+
+.vision-brand svg,
+.login-mark svg { stroke: #fff; }
+.vision-brand small,
+.hero .eyebrow,
+.hero h1 em,
+.hero-meta,
+.preview-scroll-cue,
+.preview-scroll-cue span,
+.field-note-number,
+.field-note p { color: #fff; }
+
+.hero::before,
+.hero::after,
+.hero-rings,
+.login-page::before,
+.login-page::after,
+.preview-gate::before,
+.preview-gate::after,
+.quote-block::after,
+.preview-vines,
+.closing-mark { display: none; }
+
+.vision-page .hero {
+  background-image:
+    linear-gradient(90deg, rgb(0 0 0 / 72%) 0%, rgb(0 0 0 / 36%) 62%, rgb(0 0 0 / 18%) 100%),
+    url("/static/samlabs/01-smoke.webp");
+}
+
+.vision-page .opening {
+  background-image:
+    linear-gradient(rgb(0 0 0 / 36%), rgb(0 0 0 / 36%)),
+    url("/static/samlabs/05-field.webp");
+}
+
+.vision-page .roadmap-section {
+  background-image:
+    linear-gradient(rgb(0 0 0 / 38%), rgb(0 0 0 / 38%)),
+    url("/static/samlabs/06-excavator.webp");
+}
+
+.vision-page .steps-section {
+  background:
+    linear-gradient(rgb(0 0 0 / 44%), rgb(0 0 0 / 44%)),
+    url("/static/samlabs/04-warehouse.webp") center / cover fixed;
+}
+
+.vision-page .thesis-section {
+  background-image:
+    linear-gradient(rgb(0 0 0 / 38%), rgb(0 0 0 / 38%)),
+    url("/static/samlabs/09-worker.webp");
+}
+
+.vision-page .bets-section {
+  background-image:
+    linear-gradient(rgb(0 0 0 / 40%), rgb(0 0 0 / 40%)),
+    url("/static/samlabs/10-foundry.webp");
+}
+
+.vision-page .closing {
+  background-image:
+    linear-gradient(rgb(0 0 0 / 48%), rgb(0 0 0 / 48%)),
+    url("/static/samlabs/12-harvest.webp");
+}
+
+.preview-boundary {
+  background:
+    linear-gradient(rgb(0 0 0 / 34%), rgb(0 0 0 / 34%)),
+    url("/static/samlabs/06-excavator.webp") center / cover fixed;
+}
+
+.preview-gate {
+  background:
+    linear-gradient(to bottom, transparent 0%, rgb(0 0 0 / 60%) 28%, rgb(0 0 0 / 82%) 58%, rgb(0 0 0 / 88%) 100%),
+    url("/static/samlabs/06-excavator.webp") center / cover fixed;
+}
+
+.vision-footer {
+  border-color: rgb(255 255 255 / 18%);
+  background:
+    linear-gradient(rgb(0 0 0 / 70%), rgb(0 0 0 / 70%)),
+    url("/static/samlabs/12-harvest.webp") center / cover;
+  color: rgb(255 255 255 / 76%);
+}
+
+.vision-page .opening-grid,
+.vision-page .flywheel,
+.vision-page .roadmap-section > .section-head,
+.vision-page .bets-section > .section-head,
+.vision-page .steps-section > .section-head,
+.vision-page .step > div,
+.quote-block,
+.thesis-grid article,
+.vision-page .bets-grid article,
+.login-card {
+  border-color: rgb(255 255 255 / 26%);
+  background: rgb(0 0 0 / 58%);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 28%);
+  color: #fff;
+  backdrop-filter: blur(10px);
+}
+
+.vision-page .opening > .section-kicker {
+  background: rgb(0 0 0 / 62%);
+  color: #fff;
+}
+
+h2,
+.lead-prose,
+.lead-prose p:first-child::first-letter,
+.flywheel span,
+.flywheel b,
+.flywheel small,
+.section-intro,
+.chart-title-row b,
+.chart-title-row div span,
+.chart-note,
+.phase-label span,
+.vision-page .steps-section .phase-label b,
+.vision-page .steps-section .phase-label small,
+.quote-block .section-kicker,
+.quote-block > p:last-child,
+.thesis-grid h3,
+.thesis-grid p,
+.bets-grid span,
+.bets-grid h3,
+.bets-grid p,
+.login-eyebrow,
+.login-intro,
+.login-card label,
+.login-foot { color: #fff; }
+
+.flywheel,
+.chart-card,
+.thesis-grid article,
+.bets-grid article { border-color: rgb(255 255 255 / 22%); }
+.flywheel svg { stroke: rgb(255 255 255 / 65%); }
+
+.chart-card { background: rgb(0 0 0 / 68%); }
+.chart-title-row { border-color: rgb(255 255 255 / 18%); }
+.estimate-pill { border-color: rgb(255 255 255 / 34%); background: rgb(0 0 0 / 52%); color: #fff; }
+.grid-lines line { stroke: rgb(255 255 255 / 20%); }
+.y-labels,
+.x-ticks,
+.axis-title,
+.x-axis-title { fill: rgb(255 255 255 / 76%); }
+.roadmap-area { fill: rgb(255 255 255 / 7%); }
+.roadmap-line { stroke: #fff; }
+.roadmap-points circle { fill: #111; stroke: #fff; }
+.roadmap-points ellipse { fill: #fff; }
+.label-stem { stroke: rgb(255 255 255 / 46%); }
+.point-label { fill: #fff; stroke: #111; }
+.chart-note span { background: #fff; box-shadow: none; }
+
+.vision-page .step::after {
+  background:
+    linear-gradient(to bottom, rgb(0 0 0 / 54%) 0%, transparent 20%, transparent 78%, rgb(0 0 0 / 60%) 100%),
+    linear-gradient(90deg, rgb(0 0 0 / 48%), rgb(0 0 0 / 10%));
+}
+.vision-page .step::before { filter: saturate(.85) contrast(1.05); }
+.vision-page .step > span,
+.vision-page .step h3,
+.vision-page .step p { color: #fff; }
+
+.botanical-number {
+  border-color: rgb(255 255 255 / 42%);
+  border-radius: 50%;
+  color: #fff;
+  transform: none;
+}
+
+.password-row input { border-color: rgb(255 255 255 / 42%); background: rgb(0 0 0 / 40%); }
+.password-row input::placeholder { color: rgb(255 255 255 / 56%); }
+.password-row button { border-color: #fff; background: #fff; color: #111; }
+.password-row button:hover { background: #e8e8e8; }
+
+.preview-roadmap-glimpse {
+  padding-right: max(24px, calc((100vw - 1180px) / 2));
+  padding-left: max(24px, calc((100vw - 1180px) / 2));
+  color: #fff;
+  text-shadow: 0 2px 16px rgb(0 0 0 / 70%);
+}
+.preview-roadmap-glimpse h2,
+.preview-roadmap-glimpse .section-intro { color: #fff; }
+
+@media (max-width: 640px) {
+  body,
+  .login-page,
+  .vision-page .steps-section,
+  .preview-boundary,
+  .preview-gate { background-attachment: scroll; }
+}
