@@ -27,7 +27,7 @@ button { color: inherit; }
 }
 
 .topbar {
-  position: fixed;
+  position: absolute;
   z-index: 30;
   top: 0;
   right: 0;
@@ -37,14 +37,14 @@ button { color: inherit; }
   align-items: center;
   justify-content: space-between;
   padding: 10px max(24px, calc((100vw - 1180px) / 2));
-  border-bottom: 1px solid var(--line);
-  background: rgb(0 0 0 / 34%);
-  backdrop-filter: blur(8px);
+  border: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
-.brand { display: inline-flex; align-items: center; gap: 10px; color: #fff; font-size: 13px; font-weight: 650; letter-spacing: .04em; text-decoration: none; }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: #fff; font-size: 13px; font-weight: 650; letter-spacing: .04em; text-decoration: none; pointer-events: auto; text-shadow: 0 1px 14px rgb(0 0 0 / 70%); }
 .brand svg { width: 34px; height: 34px; fill: none; stroke: #fff; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.65; }
-.topbar-action { min-height: 34px; padding: 0 14px; border: 1px solid rgb(255 255 255 / 58%); background: rgb(0 0 0 / 22%); cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.topbar-action { min-height: 34px; padding: 0 14px; border: 1px solid rgb(255 255 255 / 58%); background: rgb(0 0 0 / 22%); cursor: pointer; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; pointer-events: auto; }
 .topbar-action:hover { background: #fff; color: #111; }
 .topbar-action:focus-visible, .brand:focus-visible, input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 
