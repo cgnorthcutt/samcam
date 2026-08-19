@@ -12,6 +12,8 @@ class SamsaraLabsVisionTests(unittest.TestCase):
             self.assertEqual(locked.status_code, 200)
             self.assertIn("Vision: Robotic OS and 100B+", locked.text)
             self.assertNotIn("Private draft", locked.text)
+            self.assertIn('/static/samsara-labs-logo.svg', locked.text)
+            self.assertIn('localStorage.setItem(cookieName, encoded)', locked.text)
             self.assertIn('id="gate-modal"', locked.text)
             self.assertIn('id="vision-unlock"', locked.text)
             self.assertIn('id="encrypted-vision"', locked.text)
