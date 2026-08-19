@@ -133,10 +133,15 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
 .bets-layout .steps { margin: 0; }
 .bets-chart { min-width: 0; margin: 0; }
 .bets-curve-chart { display: block; width: 100%; height: auto; overflow: visible; font-family: var(--sans); }
-.bets-grid-lines line { stroke: rgb(255 255 255 / 18%); stroke-width: 1; }
-.bets-curve { fill: none; stroke: #5ba6ff; stroke-linecap: round; stroke-width: 4; }
-.bets-chart-annotations { fill: #ff625e; font-size: 18px; font-weight: 600; }
-.bets-chart-annotations path { fill: none; stroke: #ff3f35; stroke-linecap: round; stroke-width: 5; }
+.bets-grid-lines line { stroke: rgb(255 255 255 / 20%); stroke-width: 1; stroke-dasharray: 3 5; }
+.bets-curve { fill: none; stroke: #fff; stroke-linecap: round; stroke-width: 4; }
+.bets-chart-annotations { fill: #fff; font-family: var(--serif); font-size: 18px; font-weight: 600; paint-order: stroke; stroke: #111; stroke-linejoin: round; stroke-width: 5px; }
+.bets-markers circle { fill: #111; stroke: #fff; stroke-width: 3; }
+
+.bets-robot-section { padding-top: 96px; padding-bottom: 40px; }
+.robot-proof { width: min(1040px, 100%); margin: 0; padding: clamp(18px, 2vw, 28px); background: rgb(0 0 0 / 76%); backdrop-filter: blur(8px); }
+.robot-proof img { display: block; width: 100%; height: auto; }
+.robot-proof figcaption { margin-top: 18px; color: #fff; font-family: var(--serif); font-size: clamp(18px, 2vw, 25px); line-height: 1.45; }
 
 .gate-open { overflow: hidden; }
 .gate-modal { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(0 0 0 / 74%); opacity: 0; pointer-events: none; transition: opacity 180ms ease; backdrop-filter: blur(5px); }
@@ -174,6 +179,7 @@ h2 { max-width: 820px; font-size: clamp(40px, 5.5vw, 72px); }
   .phase-column h2 { font-size: 34px; white-space: normal; }
   .phase-column .steps li { font-size: 14px; }
   .bets-layout { grid-template-columns: 1fr; }
+  .bets-robot-section { min-height: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
